@@ -1,0 +1,23 @@
+{
+    "models": {
+        "LightGBM": {
+            "production_version": "v1",
+            "versions": [
+                {
+                    "model_name": "LightGBM",
+                    "version": "v1",
+                    "registered_at": "2026-08-22T10:01:43.525783+00:00",
+                    "dataset_version": "2025_Jan_Jun",
+                    "metrics": {
+                        "MAE": 4.1939,
+                        "RMSE": 6.7691,
+                        "R2": 0.9664,
+                        "MAPE": 0.0
+                    },
+                    "model_path": "C:\\Users\\HP\\Documents\\AQI-Prediction\\aqi-prediction-pipeline\\models\\registry\\LightGBM\\v1\\model.pkl",
+                    "status": "production"
+                }
+            ]
+        }
+    }
+}

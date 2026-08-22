@@ -1,0 +1,2 @@
+best_model,best_mae,best_rmse,best_r2,models_evaluated,test_samples,training_samples,target_column,model_extension
+LightGBM,4.1939,6.7691,0.9664,7,8634,34536,target_aqi,.joblib

@@ -1,0 +1,8 @@
+Model,Training Time (sec),Model Path,Status
+Ridge,0.12,C:\Users\HP\Documents\AQI-Prediction\aqi-prediction-pipeline\models\Ridge.joblib,SUCCESS
+RandomForest,17.45,C:\Users\HP\Documents\AQI-Prediction\aqi-prediction-pipeline\models\RandomForest.joblib,SUCCESS
+ExtraTrees,9.78,C:\Users\HP\Documents\AQI-Prediction\aqi-prediction-pipeline\models\ExtraTrees.joblib,SUCCESS
+GradientBoosting,154.66,C:\Users\HP\Documents\AQI-Prediction\aqi-prediction-pipeline\models\GradientBoosting.joblib,SUCCESS
+XGBoost,2.6,C:\Users\HP\Documents\AQI-Prediction\aqi-prediction-pipeline\models\XGBoost.joblib,SUCCESS
+LightGBM,8.6,C:\Users\HP\Documents\AQI-Prediction\aqi-prediction-pipeline\models\LightGBM.joblib,SUCCESS
+CatBoost,5.74,C:\Users\HP\Documents\AQI-Prediction\aqi-prediction-pipeline\models\CatBoost.joblib,SUCCESS
