@@ -1,0 +1,78 @@
+name: AQI Daily Monitoring
+
+"on":
+  schedule:
+    # Runs every day at 01:00 UTC
+    - cron: "0 1 * * *"
+
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aqi-daily-monitoring
+  cancel-in-progress: false
+
+jobs:
+  daily-monitoring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+      HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-automation.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-automation.txt
+
+      - name: Validate secrets
+        shell: bash
+        run: |
+          if [ -z "${OPENWEATHER_API_KEY:-}" ]; then
+            echo "OPENWEATHER_API_KEY is missing."
+            exit 1
+          fi
+
+          if [ -z "${HOPSWORKS_API_KEY:-}" ]; then
+            echo "HOPSWORKS_API_KEY is missing."
+            exit 1
+          fi
+
+          echo "Required secrets are configured."
+
+      - name: Run daily MLOps pipeline
+        run: |
+          python -m src.automation.daily_pipeline
+
+      - name: Commit monitoring outputs
+        shell: bash
+        run: |
+          git config user.name "aqi-automation-bot"
+          git config user.email "aqi-automation-bot@users.noreply.github.com"
+
+          git add results/monitoring/ || true
+
+          if git diff --cached --quiet; then
+            echo "No monitoring changes to commit."
+          else
+            git commit -m "monitoring: update AQI monitoring reports [skip ci]"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
