@@ -59,14 +59,11 @@ models/registry/**/*.pkl
 
 # ============================================================
 # Data
-#
-# Most generated/historical data stays local.
-# Keep the two real-time history files because GitHub Actions
-# needs them between hourly runs.
 # ============================================================
 
 data/*
 
+# Keep real-time history
 !data/raw/
 !data/realtime/
 
@@ -75,6 +72,11 @@ data/raw/*
 
 data/realtime/*
 !data/realtime/realtime_features.csv
+
+# Keep labelled monitoring/training dataset
+!data/processed/
+data/processed/*
+!data/processed/model_training_dataset.csv
 
 # ============================================================
 # Generated results
