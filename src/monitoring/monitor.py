@@ -54,6 +54,10 @@ from src.model_training.config import (
     RMSE_ALERT_THRESHOLD,
 )
 
+from src.model_training.utils import (
+    load_dataset as load_training_dataset,
+)
+
 from src.monitoring.drift_detection import (
     PSI_NO_DRIFT,
     PSI_MODERATE_DRIFT,
@@ -302,6 +306,64 @@ def get_production_model_info(
 
 
 # ============================================================
+# Resolve Production Model Path
+# ============================================================
+
+def resolve_production_model_path(
+    production_info,
+):
+    """
+    Resolve the production model artifact using a portable,
+    project-relative registry path.
+
+    Registry metadata may contain an absolute path created on
+    another machine (for example a Windows path). Such a path is
+    not portable to Linux/GitHub Actions, so the runtime path is
+    rebuilt from the model name and registry version.
+    """
+
+    project_root = (
+        Path(__file__)
+        .resolve()
+        .parents[2]
+    )
+
+    model_name = production_info.get(
+        "model_name"
+    )
+
+    version = production_info.get(
+        "version"
+    )
+
+    if not model_name:
+        raise RuntimeError(
+            "Production model name is missing "
+            "from registry information."
+        )
+
+    if not version:
+        raise RuntimeError(
+            "Production model version is missing "
+            "from registry information."
+        )
+
+    version = str(version)
+
+    if not version.startswith("v"):
+        version = f"v{version}"
+
+    return (
+        project_root
+        / "models"
+        / "registry"
+        / str(model_name)
+        / version
+        / "model.pkl"
+    )
+
+
+# ============================================================
 # Load Production Model
 # ============================================================
 
@@ -310,21 +372,16 @@ def load_production_model(
 ):
     """
     Load the registered production model using joblib.
+
+    The runtime artifact path is reconstructed relative to the
+    repository root so this works on Windows, Linux and GitHub
+    Actions. Absolute paths stored in registry.json are not used
+    for loading.
     """
 
-    model_path = Path(
-        production_info[
-            "model_path"
-        ]
+    model_path = resolve_production_model_path(
+        production_info
     )
-
-    if not model_path.exists():
-
-        raise FileNotFoundError(
-            "Production model artifact "
-            "does not exist:\n"
-            f"{model_path}"
-        )
 
     print(
         "\nLoading production model..."
@@ -345,18 +402,75 @@ def load_production_model(
         f"{model_path}"
     )
 
+    if not model_path.exists():
+
+        project_root = (
+            Path(__file__)
+            .resolve()
+            .parents[2]
+        )
+
+        registry_root = (
+            project_root
+            / "models"
+            / "registry"
+        )
+
+        available_models = []
+
+        if registry_root.exists():
+            available_models = [
+                str(path.relative_to(project_root))
+                for path in registry_root.rglob(
+                    "model.pkl"
+                )
+            ]
+
+        message = (
+            "Production model artifact does not exist:\n"
+            f"{model_path}"
+        )
+
+        if available_models:
+            message += (
+                "\n\nAvailable registry artifacts:\n  - "
+                + "\n  - ".join(available_models)
+            )
+
+        raise FileNotFoundError(
+            message
+        )
+
     try:
 
         model = joblib.load(
             model_path
         )
 
+    except ModuleNotFoundError as error:
+
+        raise RuntimeError(
+            "The production artifact exists, but a Python "
+            "dependency required by the serialized model is "
+            "missing.\n"
+            f"Missing dependency: {error}"
+        ) from error
+
     except Exception as error:
 
         raise RuntimeError(
             "Could not load production model.\n"
+            f"Path: {model_path}\n"
             f"Error: {error}"
         ) from error
+
+    # Store the actual runtime path in the in-memory metadata so
+    # monitoring summaries report the path used by this machine.
+    production_info[
+        "model_path"
+    ] = str(
+        model_path
+    )
 
     print(
         "\nProduction model loaded successfully."
@@ -371,31 +485,86 @@ def load_production_model(
 
 def load_monitoring_dataset():
     """
-    Load the model-training dataset used for monitoring.
+    Load the labelled dataset used for monitoring.
+
+    Loading strategy
+    ----------------
+    1. Use DATASET_PATH when the processed CSV exists locally.
+    2. Otherwise call the project's shared training-data loader,
+       which can use the project's cache/Hopsworks data source.
+
+    This keeps monitoring portable between the local Windows
+    environment and GitHub Actions.
     """
 
     dataset_path = Path(
         DATASET_PATH
     )
 
-    if not dataset_path.exists():
-
-        raise FileNotFoundError(
-            "Monitoring dataset not found:\n"
-            f"{dataset_path}"
-        )
-
     print(
         "\nLoading monitoring dataset..."
     )
 
-    df = pd.read_csv(
-        dataset_path
-    )
+    if dataset_path.exists():
 
-    # --------------------------------------------------------
-    # Required columns
-    # --------------------------------------------------------
+        print(
+            "Using local monitoring dataset:"
+        )
+
+        print(
+            dataset_path
+        )
+
+        try:
+            df = pd.read_csv(
+                dataset_path
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "Local monitoring dataset exists but could "
+                "not be loaded.\n"
+                f"Path: {dataset_path}\n"
+                f"Error: {error}"
+            ) from error
+
+        source = "LOCAL_CSV"
+
+    else:
+
+        print(
+            "Local monitoring dataset was not found."
+        )
+
+        print(
+            f"Expected local path:\n{dataset_path}"
+        )
+
+        print(
+            "Falling back to the shared training-data loader..."
+        )
+
+        try:
+            df = load_training_dataset()
+        except Exception as error:
+            raise RuntimeError(
+                "Monitoring data could not be loaded from the "
+                "local processed dataset or the shared training "
+                "data source.\n"
+                f"Local path: {dataset_path}\n"
+                f"Loader error: {error}"
+            ) from error
+
+        source = "SHARED_DATA_LOADER"
+
+    if df is None:
+        raise RuntimeError(
+            "Monitoring dataset loader returned None."
+        )
+
+    if df.empty:
+        raise ValueError(
+            "Monitoring dataset is empty."
+        )
 
     required_columns = [
         "timestamp",
@@ -410,55 +579,73 @@ def load_monitoring_dataset():
     ]
 
     if missing_columns:
-
         raise ValueError(
-            "Monitoring dataset is missing "
-            "required columns:\n"
+            "Monitoring dataset is missing required columns:\n"
             f"{missing_columns}"
         )
 
-    # --------------------------------------------------------
-    # Timestamp
-    # --------------------------------------------------------
-
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"],
+    df[
+        "timestamp"
+    ] = pd.to_datetime(
+        df[
+            "timestamp"
+        ],
         errors="coerce",
     )
 
-    if df["timestamp"].isna().any():
+    invalid_count = int(
+        df[
+            "timestamp"
+        ]
+        .isna()
+        .sum()
+    )
 
-        invalid_count = int(
-            df["timestamp"]
-            .isna()
-            .sum()
-        )
-
+    if invalid_count > 0:
         raise ValueError(
-            "Invalid timestamps found in "
-            "monitoring dataset: "
+            "Invalid timestamps found in monitoring dataset: "
             f"{invalid_count}"
         )
 
-    # --------------------------------------------------------
-    # Target
-    # --------------------------------------------------------
+    missing_target_count = int(
+        df[
+            TARGET_COLUMN
+        ]
+        .isna()
+        .sum()
+    )
 
-    if df[TARGET_COLUMN].isna().any():
+    if missing_target_count > 0:
 
         print(
             "\nWarning:"
         )
 
         print(
-            "Some target values are missing. "
-            "Rows without targets will be excluded "
-            "from performance evaluation."
+            f"{missing_target_count:,} rows have missing target "
+            "values. They will be excluded from performance "
+            "evaluation."
         )
 
-    # --------------------------------------------------------
-    # Sort chronologically
-    # --------------------------------------------------------
+    before = len(df)
+
+    df = df.drop_duplicates(
+        subset=[
+            "timestamp",
+            "city",
+        ],
+        keep="last",
+    )
+
+    duplicate_count = (
+        before
+        - len(df)
+    )
+
+    if duplicate_count > 0:
+        print(
+            f"Removed duplicate rows: {duplicate_count:,}"
+        )
 
     df = (
         df.sort_values(
@@ -477,25 +664,29 @@ def load_monitoring_dataset():
     )
 
     print(
-        f"Rows       : "
-        f"{len(df):,}"
+        f"Source     : {source}"
     )
 
     print(
-        f"Columns    : "
-        f"{len(df.columns)}"
+        f"Rows       : {len(df):,}"
+    )
+
+    print(
+        f"Columns    : {len(df.columns)}"
     )
 
     print(
         f"Date range : "
         f"{df['timestamp'].min()} "
-        f"→ "
-        f"{df['timestamp'].max()}"
+        f"→ {df['timestamp'].max()}"
     )
 
     print(
-        f"Cities     : "
-        f"{df['city'].nunique()}"
+        f"Cities     : {df['city'].nunique()}"
+    )
+
+    print(
+        f"Target     : {TARGET_COLUMN}"
     )
 
     return df
