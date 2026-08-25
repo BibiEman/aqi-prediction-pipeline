@@ -1,3 +1,4 @@
 timestamp,model,version,overall_status,numeric_features,drift_features,moderate_drift_features,no_drift_features,drift_percentage,mean_psi,categorical_drift_features,current_mae,current_rmse,current_r2,registered_rmse,rmse_alert_threshold,performance_status
 2026-08-23T13:22:01.127057+00:00,LightGBM,v1,DRIFT_DETECTED,28,10,10,8,35.71,0.809088,1,4.19393551981666,6.769140106297624,0.9663587320437662,6.7691,30.0,NORMAL
 2026-08-24T02:23:44.132428+00:00,LightGBM,v1,DRIFT_DETECTED,28,10,10,8,35.71,0.809088,1,4.19393551981666,6.769140106297624,0.9663587320437662,6.7691,30.0,NORMAL
+2026-08-25T02:19:22.974188+00:00,LightGBM,v1,DRIFT_DETECTED,28,10,10,8,35.71,0.809088,1,4.19393551981666,6.769140106297624,0.9663587320437662,6.7691,30.0,NORMAL
