@@ -1,12 +1,16 @@
 """
 schemas.py
 
-Pydantic schemas for the AQI 3-Day Forecast API.
+Pydantic response/request schemas for the
+AQI Production Forecasting API.
 """
 
-from typing import List
+from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+)
 
 
 # ============================================================
@@ -15,40 +19,52 @@ from pydantic import BaseModel, Field
 
 class ForecastRequest(BaseModel):
     """
-    Request schema for generating a 3-day AQI forecast
-    for one city.
+    Request one 3-day AQI forecast.
     """
 
     city: str = Field(
         ...,
         min_length=2,
         max_length=100,
-        description="City name, for example Lahore",
+        description="Supported city, e.g. Lahore",
+        examples=["Lahore"],
     )
 
 
 # ============================================================
-# One Forecast Point
+# Forecast Point
 # ============================================================
 
 class ForecastPoint(BaseModel):
     """
-    One forecast point in the 3-day forecast.
-
-    The model creates predictions every 3 hours.
+    One +3-hour forecast point.
     """
 
     timestamp: str
 
-    forecast_step: int
+    forecast_step: int = Field(
+        ge=1
+    )
 
-    hours_ahead: int
+    hours_ahead: int = Field(
+        ge=3,
+        le=72,
+    )
 
-    predicted_aqi: float
+    predicted_aqi: float = Field(
+        ge=0,
+        le=500,
+    )
 
     aqi_category: str
 
     alert_level: str
+
+    health_guidance: Optional[str] = None
+
+    data_source: Optional[str] = None
+
+    forecast_method: Optional[str] = None
 
 
 # ============================================================
@@ -57,7 +73,7 @@ class ForecastPoint(BaseModel):
 
 class ForecastResponse(BaseModel):
     """
-    Response schema for a complete 3-day AQI forecast.
+    Complete 3-day city forecast.
     """
 
     city: str
@@ -72,7 +88,11 @@ class ForecastResponse(BaseModel):
 
     predictions_count: int
 
-    forecast: List[ForecastPoint]
+    data_source: str
+
+    forecast: List[
+        ForecastPoint
+    ]
 
     status: str
 
@@ -83,7 +103,7 @@ class ForecastResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """
-    Optional health-check response schema.
+    API health information.
     """
 
     status: str
@@ -92,6 +112,12 @@ class HealthResponse(BaseModel):
 
     production_version: str
 
+    realtime_rows: int
+
     historical_rows: int
 
     cities: int
+
+    forecasting: bool
+
+    realtime_monitoring: bool

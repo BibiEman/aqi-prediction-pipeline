@@ -1,18 +1,17 @@
 """
 predict.py
 
-3-Day AQI Forecasting Pipeline
+Production 3-Day AQI Forecasting Pipeline.
 
 Purpose
 -------
-Generate AQI forecasts for the next 3 days using the trained
-LightGBM model.
+Generate AQI forecasts for the next 72 hours using the
+currently promoted production model from the local model registry.
 
-The model was trained with:
-
+Forecast configuration
+----------------------
+Model target:
     target_aqi(t) = us_aqi(t + 3 hours)
-
-Therefore forecasts are generated recursively every 3 hours.
 
 Forecast horizon:
     72 hours = 3 days
@@ -20,75 +19,94 @@ Forecast horizon:
 Forecast interval:
     3 hours
 
-Forecast points per city:
-    72 / 3 = 24
+Forecast points:
+    24 predictions per city
 
-For 10 cities:
-    24 x 10 = 240 predictions
+Production architecture
+-----------------------
+Latest real-time features
+        ↓
+Production model registry
+        ↓
+Production sklearn pipeline
+        ↓
+Recursive +3-hour forecasting
+        ↓
+3-day AQI forecast
 
-IMPORTANT
+Important
 ---------
-The saved LightGBM .joblib file already contains the complete:
+The serialized production model already contains:
 
     ColumnTransformer
-          +
+        ↓
     OneHotEncoder
-          +
-    LightGBM model
+        ↓
+    LightGBM
 
-Therefore categorical features are NOT manually encoded.
+Therefore categorical variables are NOT encoded manually.
 
-Future weather/pollutant values are currently handled using a
-persistence assumption: the latest available values are retained.
+Future weather and pollutant variables currently use a
+persistence assumption. AQI autoregressive features are updated
+recursively.
 
-For a production deployment, replace these persisted values with
-future weather and pollution forecasts from an external API.
+This module is cross-platform and works on:
+
+    Windows
+    Linux
+    GitHub Actions
 """
 
+import json
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
+import joblib
 import numpy as np
 import pandas as pd
 
-from src.model_training.config import (
-    MODEL_DIR,
-    RESULTS_DIR,
-)
-
-from src.model_training.utils import (
-    load_dataset,
-    load_model,
-)
-
 
 # ============================================================
-# CONFIGURATION
+# Project Paths
 # ============================================================
 
-BEST_MODEL_NAME = "LightGBM"
-
-FORECAST_DAYS = 3
-
-FORECAST_INTERVAL_HOURS = 3
-
-FORECAST_HOURS = (
-    FORECAST_DAYS * 24
+PROJECT_ROOT = (
+    Path(__file__)
+    .resolve()
+    .parents[2]
 )
 
-FORECAST_STEPS = (
-    FORECAST_HOURS
-    // FORECAST_INTERVAL_HOURS
+MODELS_DIR = (
+    PROJECT_ROOT
+    / "models"
 )
 
-
-MODEL_PATH = (
-    Path(MODEL_DIR)
-    / f"{BEST_MODEL_NAME}.joblib"
+REGISTRY_FILE = (
+    MODELS_DIR
+    / "registry.json"
 )
 
+HISTORICAL_DATA_FILE = (
+    PROJECT_ROOT
+    / "data"
+    / "processed"
+    / "model_training_dataset.csv"
+)
+
+REALTIME_FEATURE_FILE = (
+    PROJECT_ROOT
+    / "data"
+    / "realtime"
+    / "realtime_features.csv"
+)
+
+RESULTS_DIR = (
+    PROJECT_ROOT
+    / "results"
+)
 
 PREDICTION_DIR = (
-    Path(RESULTS_DIR)
+    RESULTS_DIR
     / "predictions"
 )
 
@@ -97,7 +115,6 @@ PREDICTION_DIR.mkdir(
     exist_ok=True,
 )
 
-
 FORECAST_FILE = (
     PREDICTION_DIR
     / "aqi_3day_forecast.csv"
@@ -105,40 +122,99 @@ FORECAST_FILE = (
 
 
 # ============================================================
-# FEATURE COLUMNS
+# Forecast Configuration
 # ============================================================
 
-AQI_LAG_COLUMNS = [
-    "aqi_lag_1",
-    "aqi_lag_3",
-    "aqi_lag_6",
-    "aqi_lag_24",
-]
+FORECAST_DAYS = 3
+
+FORECAST_INTERVAL_HOURS = 3
+
+FORECAST_HOURS = (
+    FORECAST_DAYS
+    * 24
+)
+
+FORECAST_STEPS = (
+    FORECAST_HOURS
+    // FORECAST_INTERVAL_HOURS
+)
+
+MINIMUM_HISTORY_HOURS = 24
 
 
-AQI_ROLLING_COLUMNS = [
-    "aqi_roll_3",
-    "aqi_roll_6",
-    "aqi_roll_24",
-]
-
+# ============================================================
+# Model Columns
+# ============================================================
 
 NON_MODEL_COLUMNS = [
     "timestamp",
     "target_aqi",
+    "model_ready",
 ]
 
 
 # ============================================================
-# AQI CATEGORY
+# Supported Cities
 # ============================================================
 
-def get_aqi_category(aqi):
-    """
-    Convert AQI value into a human-readable category.
+SUPPORTED_CITIES = [
+    "Faisalabad",
+    "Hyderabad",
+    "Islamabad",
+    "Karachi",
+    "Lahore",
+    "Multan",
+    "Peshawar",
+    "Quetta",
+    "Rawalpindi",
+    "Sialkot",
+]
 
-    US AQI categories are used.
+
+# ============================================================
+# City Normalization
+# ============================================================
+
+CITY_NORMALIZATION = {
+    "Siālkot": "Sialkot",
+    "Sialkot": "Sialkot",
+}
+
+
+def normalize_city_name(
+    city,
+):
     """
+    Normalize inconsistent API city spellings.
+    """
+
+    city = str(
+        city
+    ).strip()
+
+    return CITY_NORMALIZATION.get(
+        city,
+        city,
+    )
+
+
+# ============================================================
+# AQI Classification
+# ============================================================
+
+def get_aqi_category(
+    aqi,
+):
+    """
+    Return US AQI category.
+    """
+
+    if aqi is None:
+        return "Unknown"
+
+    aqi = float(
+        aqi
+    )
 
     if aqi <= 50:
         return "Good"
@@ -147,7 +223,9 @@ def get_aqi_category(aqi):
         return "Moderate"
 
     if aqi <= 150:
-        return "Unhealthy for Sensitive Groups"
+        return (
+            "Unhealthy for Sensitive Groups"
+        )
 
     if aqi <= 200:
         return "Unhealthy"
@@ -158,14 +236,19 @@ def get_aqi_category(aqi):
     return "Hazardous"
 
 
-# ============================================================
-# AQI ALERT
-# ============================================================
+def get_alert_level(
+    aqi,
+):
+    """
+    Convert AQI into operational alert level.
+    """
 
-def get_alert_level(aqi):
-    """
-    Generate a simple alert level.
-    """
+    if aqi is None:
+        return "Unknown"
+
+    aqi = float(
+        aqi
+    )
 
     if aqi <= 100:
         return "Normal"
@@ -174,101 +257,405 @@ def get_alert_level(aqi):
         return "Caution"
 
     if aqi <= 200:
-        return "Health Alert"
+        return "Warning"
 
     if aqi <= 300:
-        return "Severe Health Alert"
+        return "High Alert"
 
     return "Emergency"
 
 
-# ============================================================
-# SEASON
-# ============================================================
-
-def get_season(month):
+def get_health_guidance(
+    aqi,
+):
     """
-    Convert month into season.
+    Return basic public-health guidance.
     """
 
-    if month in [12, 1, 2]:
+    if aqi is None:
+        return (
+            "AQI information is unavailable."
+        )
+
+    if aqi <= 50:
+
+        return (
+            "Air quality is satisfactory. "
+            "Normal outdoor activity may continue."
+        )
+
+    if aqi <= 100:
+
+        return (
+            "Air quality is acceptable for most people. "
+            "Very sensitive individuals should monitor exposure."
+        )
+
+    if aqi <= 150:
+
+        return (
+            "Sensitive groups should reduce prolonged "
+            "or strenuous outdoor activity."
+        )
+
+    if aqi <= 200:
+
+        return (
+            "Everyone may experience health effects. "
+            "Sensitive groups should avoid prolonged "
+            "outdoor exposure."
+        )
+
+    if aqi <= 300:
+
+        return (
+            "Health alert conditions are expected. "
+            "Significantly reduce outdoor activity."
+        )
+
+    return (
+        "Hazardous air quality. Avoid unnecessary outdoor "
+        "activity and follow public-health guidance."
+    )
+
+
+# ============================================================
+# Season
+# ============================================================
+
+def get_season(
+    month,
+):
+    """
+    Convert month to season.
+    """
+
+    month = int(
+        month
+    )
+
+    if month in [
+        12,
+        1,
+        2,
+    ]:
         return "Winter"
 
-    if month in [3, 4, 5]:
+    if month in [
+        3,
+        4,
+        5,
+    ]:
         return "Spring"
 
-    if month in [6, 7, 8]:
+    if month in [
+        6,
+        7,
+        8,
+    ]:
         return "Summer"
 
     return "Autumn"
 
 
 # ============================================================
-# LOAD BEST MODEL
+# Registry
 # ============================================================
 
-def load_best_model():
+def load_registry():
     """
-    Load trained LightGBM pipeline.
+    Load local model registry metadata.
     """
 
     print("\n" + "=" * 70)
-    print("LOADING PRODUCTION MODEL")
+    print("LOADING MODEL REGISTRY")
+    print("=" * 70)
+
+    if not REGISTRY_FILE.exists():
+
+        raise FileNotFoundError(
+            "Model registry was not found.\n"
+            f"Expected:\n{REGISTRY_FILE}"
+        )
+
+    try:
+
+        with open(
+            REGISTRY_FILE,
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            registry = json.load(
+                file
+            )
+
+    except json.JSONDecodeError as error:
+
+        raise RuntimeError(
+            "Model registry contains invalid JSON.\n"
+            f"File:\n{REGISTRY_FILE}"
+        ) from error
+
+    print(
+        f"\nRegistry:\n{REGISTRY_FILE}"
+    )
+
+    return registry
+
+
+# ============================================================
+# Production Model Information
+# ============================================================
+
+def get_production_model_info(
+    registry,
+):
+    """
+    Find the currently promoted production model.
+    """
+
+    models = registry.get(
+        "models",
+        {},
+    )
+
+    if not models:
+
+        raise RuntimeError(
+            "Model registry contains no models."
+        )
+
+    for (
+        model_name,
+        model_info,
+    ) in models.items():
+
+        production_version = (
+            model_info.get(
+                "production_version"
+            )
+        )
+
+        if not production_version:
+            continue
+
+        versions = model_info.get(
+            "versions",
+            [],
+        )
+
+        for version_info in versions:
+
+            if (
+                version_info.get(
+                    "version"
+                )
+                == production_version
+            ):
+
+                return {
+                    "model_name":
+                        model_name,
+
+                    "version":
+                        production_version,
+
+                    "metrics":
+                        version_info.get(
+                            "metrics",
+                            {},
+                        ),
+
+                    "dataset_version":
+                        version_info.get(
+                            "dataset_version"
+                        ),
+
+                    "registered_at":
+                        version_info.get(
+                            "registered_at"
+                        ),
+
+                    "status":
+                        version_info.get(
+                            "status",
+                            "production",
+                        ),
+                }
+
+    raise RuntimeError(
+        "No production model is currently "
+        "defined in registry.json."
+    )
+
+
+# ============================================================
+# Portable Registry Model Path
+# ============================================================
+
+def resolve_production_model_path(
+    production_info,
+):
+    """
+    Resolve production model relative to PROJECT_ROOT.
+
+    Never trusts machine-specific absolute paths stored in
+    historical registry metadata.
+    """
+
+    model_name = (
+        production_info[
+            "model_name"
+        ]
+    )
+
+    version = str(
+        production_info[
+            "version"
+        ]
+    )
+
+    if not version.startswith(
+        "v"
+    ):
+
+        version = (
+            f"v{version}"
+        )
+
+    return (
+        MODELS_DIR
+        / "registry"
+        / model_name
+        / version
+        / "model.pkl"
+    )
+
+
+# ============================================================
+# Load Production Model
+# ============================================================
+
+def load_production_model():
+    """
+    Load currently promoted production sklearn pipeline.
+
+    Returns
+    -------
+    model
+        Complete sklearn preprocessing/model pipeline.
+
+    production_info : dict
+        Production registry metadata.
+    """
+
+    registry = load_registry()
+
+    production_info = (
+        get_production_model_info(
+            registry
+        )
+    )
+
+    model_path = (
+        resolve_production_model_path(
+            production_info
+        )
+    )
+
+    print("\n" + "=" * 70)
+    print("LOADING PRODUCTION AQI MODEL")
     print("=" * 70)
 
     print(
-        f"\nModel : {BEST_MODEL_NAME}"
+        f"\nModel   : "
+        f"{production_info['model_name']}"
     )
 
     print(
-        f"Path  : {MODEL_PATH}"
+        f"Version : "
+        f"{production_info['version']}"
     )
 
-    if not MODEL_PATH.exists():
+    print(
+        f"Path    : "
+        f"{model_path}"
+    )
+
+    if not model_path.exists():
 
         raise FileNotFoundError(
-            "\nTrained model was not found.\n"
-            f"Expected:\n{MODEL_PATH}"
+            "Production model artifact "
+            "was not found.\n\n"
+            f"Expected:\n{model_path}"
         )
 
-    model = load_model(
-        MODEL_PATH
-    )
+    try:
+
+        model = joblib.load(
+            model_path
+        )
+
+    except Exception as error:
+
+        raise RuntimeError(
+            "Production model could not be loaded.\n"
+            f"Path: {model_path}\n"
+            f"Error: {error}"
+        ) from error
 
     print(
         "\nProduction model loaded successfully."
     )
 
-    return model
+    production_info[
+        "resolved_model_path"
+    ] = str(
+        model_path
+    )
+
+    return (
+        model,
+        production_info,
+    )
 
 
 # ============================================================
-# GET EXPECTED MODEL FEATURES
+# Model Feature Names
 # ============================================================
 
-def get_model_feature_columns(model):
+def get_model_feature_columns(
+    model,
+):
     """
-    Get the raw input columns expected by the saved pipeline.
-
-    The sklearn pipeline stores the feature names used when
-    the preprocessor was fitted.
+    Get raw feature names expected by sklearn pipeline.
     """
 
     if not hasattr(
         model,
         "named_steps",
     ):
+
         raise RuntimeError(
-            "Loaded model is not a sklearn Pipeline."
+            "Production artifact is not "
+            "an sklearn Pipeline."
         )
 
-    if "preprocessor" not in model.named_steps:
+    if (
+        "preprocessor"
+        not in model.named_steps
+    ):
+
         raise RuntimeError(
-            "Pipeline does not contain a preprocessor."
+            "Production pipeline does not contain "
+            "the expected 'preprocessor' step."
         )
 
     preprocessor = (
-        model.named_steps["preprocessor"]
+        model.named_steps[
+            "preprocessor"
+        ]
     )
 
     if hasattr(
@@ -281,20 +668,37 @@ def get_model_feature_columns(model):
         )
 
     raise RuntimeError(
-        "Could not determine model input features."
+        "Could not determine production "
+        "model input feature names."
     )
 
 
 # ============================================================
-# VALIDATE DATASET
+# Dataset Preparation
 # ============================================================
 
-def prepare_dataset(df):
+def prepare_dataset(
+    dataframe,
+):
     """
-    Validate and sort the historical dataset.
+    Clean and normalize a forecasting source dataset.
     """
 
-    required_columns = [
+    if dataframe is None:
+
+        raise ValueError(
+            "Forecast dataset is None."
+        )
+
+    if dataframe.empty:
+
+        raise ValueError(
+            "Forecast dataset is empty."
+        )
+
+    dataframe = dataframe.copy()
+
+    required = [
         "timestamp",
         "city",
         "us_aqi",
@@ -302,45 +706,522 @@ def prepare_dataset(df):
 
     missing = [
         column
-        for column in required_columns
-        if column not in df.columns
+        for column in required
+        if column
+        not in dataframe.columns
     ]
 
     if missing:
 
         raise ValueError(
-            "Dataset is missing required columns:\n"
+            "Forecast dataset is missing "
+            "required columns:\n"
             f"{missing}"
         )
 
-    df = df.copy()
-
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"],
+    dataframe[
+        "timestamp"
+    ] = pd.to_datetime(
+        dataframe[
+            "timestamp"
+        ],
         errors="coerce",
     )
 
-    if df["timestamp"].isna().any():
+    dataframe = dataframe[
+        dataframe[
+            "timestamp"
+        ].notna()
+    ].copy()
 
-        raise ValueError(
-            "Invalid timestamp values found."
+    dataframe[
+        "city"
+    ] = (
+        dataframe[
+            "city"
+        ]
+        .apply(
+            normalize_city_name
         )
+    )
 
-    df = (
-        df.sort_values(
+    dataframe[
+        "us_aqi"
+    ] = pd.to_numeric(
+        dataframe[
+            "us_aqi"
+        ],
+        errors="coerce",
+    )
+
+    dataframe = dataframe[
+        dataframe[
+            "us_aqi"
+        ].notna()
+    ].copy()
+
+    dataframe = (
+        dataframe
+        .sort_values(
             [
                 "city",
                 "timestamp",
             ]
         )
-        .reset_index(drop=True)
+        .drop_duplicates(
+            subset=[
+                "city",
+                "timestamp",
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
-    return df
+    return dataframe
 
 
 # ============================================================
-# UPDATE TIME FEATURES
+# Historical Dataset
+# ============================================================
+
+def load_historical_dataset():
+    """
+    Load historical model-training dataset.
+    """
+
+    if not HISTORICAL_DATA_FILE.exists():
+
+        return None
+
+    print(
+        "\nLoading historical forecasting data..."
+    )
+
+    dataframe = pd.read_csv(
+        HISTORICAL_DATA_FILE
+    )
+
+    dataframe = prepare_dataset(
+        dataframe
+    )
+
+    print(
+        f"Historical rows : "
+        f"{len(dataframe):,}"
+    )
+
+    print(
+        f"Historical end  : "
+        f"{dataframe['timestamp'].max()}"
+    )
+
+    return dataframe
+
+
+# ============================================================
+# Real-Time Dataset
+# ============================================================
+
+def load_realtime_dataset():
+    """
+    Load locally persisted real-time engineered features.
+    """
+
+    if not REALTIME_FEATURE_FILE.exists():
+
+        return None
+
+    print(
+        "\nLoading real-time forecasting features..."
+    )
+
+    dataframe = pd.read_csv(
+        REALTIME_FEATURE_FILE
+    )
+
+    dataframe = prepare_dataset(
+        dataframe
+    )
+
+    print(
+        f"Real-time rows : "
+        f"{len(dataframe):,}"
+    )
+
+    print(
+        f"Real-time end  : "
+        f"{dataframe['timestamp'].max()}"
+    )
+
+    return dataframe
+
+
+# ============================================================
+# Real-Time History Coverage
+# ============================================================
+
+def has_sufficient_realtime_history(
+    city_data,
+):
+    """
+    Determine whether real-time data covers enough elapsed
+    time to support 24-hour autoregressive features.
+    """
+
+    if city_data is None:
+        return False
+
+    if city_data.empty:
+        return False
+
+    city_data = (
+        city_data
+        .sort_values(
+            "timestamp"
+        )
+    )
+
+    latest = (
+        city_data[
+            "timestamp"
+        ].max()
+    )
+
+    earliest = (
+        city_data[
+            "timestamp"
+        ].min()
+    )
+
+    coverage_hours = (
+        latest
+        - earliest
+    ).total_seconds() / 3600
+
+    return (
+        coverage_hours
+        >= MINIMUM_HISTORY_HOURS
+    )
+
+
+# ============================================================
+# Latest Row Validation
+# ============================================================
+
+def latest_row_is_model_ready(
+    city_data,
+    expected_columns,
+):
+    """
+    Verify latest row contains the model's required inputs.
+
+    Some future recursive AQI fields will be recalculated,
+    but current meteorological/pollutant variables need to
+    exist before forecasting starts.
+    """
+
+    if city_data.empty:
+        return False
+
+    latest = (
+        city_data
+        .sort_values(
+            "timestamp"
+        )
+        .iloc[-1]
+    )
+
+    missing_columns = [
+        column
+        for column in expected_columns
+        if column
+        not in latest.index
+    ]
+
+    if missing_columns:
+
+        return False
+
+    important_columns = [
+        column
+        for column in expected_columns
+        if column
+        not in [
+            "aqi_lag_1",
+            "aqi_lag_3",
+            "aqi_lag_6",
+            "aqi_lag_24",
+            "aqi_roll_3",
+            "aqi_roll_6",
+            "aqi_roll_24",
+        ]
+    ]
+
+    for column in important_columns:
+
+        value = latest[
+            column
+        ]
+
+        if pd.isna(
+            value
+        ):
+
+            return False
+
+    return True
+
+
+# ============================================================
+# Source Selection
+# ============================================================
+
+def select_city_forecast_source(
+    city,
+    realtime_df,
+    historical_df,
+    expected_columns,
+):
+    """
+    Prefer real-time features when adequate history exists.
+
+    Otherwise fall back to historical data.
+
+    Returns
+    -------
+    city_data
+    source_name
+    """
+
+    if realtime_df is not None:
+
+        realtime_city = (
+            realtime_df[
+                realtime_df[
+                    "city"
+                ]
+                == city
+            ]
+            .copy()
+        )
+
+        if (
+            not realtime_city.empty
+            and
+            has_sufficient_realtime_history(
+                realtime_city
+            )
+            and
+            latest_row_is_model_ready(
+                realtime_city,
+                expected_columns,
+            )
+        ):
+
+            return (
+                realtime_city,
+                "REALTIME",
+            )
+
+    if historical_df is not None:
+
+        historical_city = (
+            historical_df[
+                historical_df[
+                    "city"
+                ]
+                == city
+            ]
+            .copy()
+        )
+
+        if not historical_city.empty:
+
+            return (
+                historical_city,
+                "HISTORICAL_FALLBACK",
+            )
+
+    raise RuntimeError(
+        f"No usable forecasting data "
+        f"is available for {city}."
+    )
+
+
+# ============================================================
+# Hourly AQI History
+# ============================================================
+
+def build_hourly_aqi_history(
+    city_data,
+):
+    """
+    Convert available AQI observations into an hourly series.
+
+    Real-time features may be stored at 3-hour intervals.
+    The production model, however, was trained with hourly lag
+    semantics:
+
+        lag_1  = 1 hour
+        lag_3  = 3 hours
+        lag_6  = 6 hours
+        lag_24 = 24 hours
+
+    Therefore the observed series is reindexed hourly and
+    forward-filled between available observations.
+    """
+
+    history = (
+        city_data[
+            [
+                "timestamp",
+                "us_aqi",
+            ]
+        ]
+        .dropna()
+        .drop_duplicates(
+            subset=[
+                "timestamp"
+            ],
+            keep="last",
+        )
+        .sort_values(
+            "timestamp"
+        )
+        .set_index(
+            "timestamp"
+        )[
+            "us_aqi"
+        ]
+        .astype(float)
+    )
+
+    if history.empty:
+
+        raise ValueError(
+            "Cannot create AQI history "
+            "from an empty series."
+        )
+
+    full_index = pd.date_range(
+        start=history.index.min(),
+        end=history.index.max(),
+        freq="1h",
+    )
+
+    history = (
+        history
+        .reindex(
+            full_index
+        )
+        .ffill()
+    )
+
+    history.index.name = (
+        "timestamp"
+    )
+
+    return history
+
+
+# ============================================================
+# Historical AQI Lookup
+# ============================================================
+
+def get_aqi_at_or_before(
+    history,
+    timestamp,
+):
+    """
+    Retrieve AQI at an exact timestamp or nearest prior value.
+    """
+
+    if history.empty:
+
+        raise ValueError(
+            "AQI history is empty."
+        )
+
+    if timestamp in history.index:
+
+        return float(
+            history.loc[
+                timestamp
+            ]
+        )
+
+    available = history[
+        history.index
+        <= timestamp
+    ]
+
+    if available.empty:
+
+        return float(
+            history.iloc[0]
+        )
+
+    return float(
+        available.iloc[-1]
+    )
+
+
+# ============================================================
+# Rolling AQI Mean
+# ============================================================
+
+def get_rolling_mean(
+    history,
+    forecast_timestamp,
+    hours,
+):
+    """
+    Calculate historical hourly AQI average over a window
+    ending immediately before the forecast timestamp.
+    """
+
+    start_time = (
+        forecast_timestamp
+        - pd.Timedelta(
+            hours=hours
+        )
+    )
+
+    end_time = (
+        forecast_timestamp
+        - pd.Timedelta(
+            hours=1
+        )
+    )
+
+    values = history[
+        (
+            history.index
+            >= start_time
+        )
+        &
+        (
+            history.index
+            <= end_time
+        )
+    ]
+
+    if values.empty:
+
+        return float(
+            history.iloc[-1]
+        )
+
+    return float(
+        values.mean()
+    )
+
+
+# ============================================================
+# Update Time Features
 # ============================================================
 
 def update_time_features(
@@ -348,211 +1229,209 @@ def update_time_features(
     timestamp,
 ):
     """
-    Update calendar features for a future timestamp.
+    Update future calendar features.
     """
 
     if "hour" in row.index:
-
-        row["hour"] = (
-            timestamp.hour
-        )
+        row["hour"] = timestamp.hour
 
     if "day" in row.index:
-
-        row["day"] = (
-            timestamp.day
-        )
+        row["day"] = timestamp.day
 
     if "month" in row.index:
-
-        row["month"] = (
-            timestamp.month
-        )
+        row["month"] = timestamp.month
 
     if "year" in row.index:
-
-        row["year"] = (
-            timestamp.year
-        )
+        row["year"] = timestamp.year
 
     if "day_of_week" in row.index:
 
-        row["day_of_week"] = (
-            timestamp.day_name()
-        )
+        row[
+            "day_of_week"
+        ] = timestamp.day_name()
 
     if "is_weekend" in row.index:
 
-        row["is_weekend"] = int(
-            timestamp.dayofweek >= 5
+        row[
+            "is_weekend"
+        ] = int(
+            timestamp.dayofweek
+            >= 5
         )
 
     if "season" in row.index:
 
-        row["season"] = (
-            get_season(
-                timestamp.month
-            )
+        row[
+            "season"
+        ] = get_season(
+            timestamp.month
         )
 
     return row
 
 
 # ============================================================
-# SAFE HISTORICAL AQI LOOKUP
-# ============================================================
-
-def get_history_value(
-    history,
-    hours_back,
-):
-    """
-    Return an AQI value from available AQI history.
-
-    The history is hourly historical data followed by recursively
-    predicted values.
-
-    When an exact intermediate hourly prediction is unavailable,
-    the nearest available previous value is used.
-    """
-
-    if not history:
-
-        raise ValueError(
-            "AQI history is empty."
-        )
-
-    index = (
-        len(history)
-        - hours_back
-    )
-
-    if index < 0:
-
-        return float(
-            history[0]
-        )
-
-    return float(
-        history[index]
-    )
-
-
-# ============================================================
-# UPDATE AQI FEATURES
+# Update AQI Autoregressive Features
 # ============================================================
 
 def update_aqi_features(
     row,
-    aqi_history,
+    history,
+    forecast_timestamp,
 ):
     """
-    Recalculate lag and rolling AQI features.
-
-    aqi_history contains historical and recursively generated AQI
-    values.
+    Rebuild AQI lag/rolling features using hourly semantics.
     """
 
-    if not aqi_history:
-
-        raise ValueError(
-            "Cannot calculate AQI features "
-            "because AQI history is empty."
+    # AQI known immediately before prediction.
+    current_timestamp = (
+        forecast_timestamp
+        - pd.Timedelta(
+            hours=1
         )
+    )
 
-    # --------------------------------------------------------
-    # Current AQI
-    # --------------------------------------------------------
-
-    current_aqi = float(
-        aqi_history[-1]
+    current_aqi = (
+        get_aqi_at_or_before(
+            history,
+            current_timestamp,
+        )
     )
 
     if "us_aqi" in row.index:
 
-        row["us_aqi"] = (
-            current_aqi
-        )
+        row[
+            "us_aqi"
+        ] = current_aqi
 
-    # --------------------------------------------------------
-    # Lag features
-    # --------------------------------------------------------
+    lag_mapping = {
+        "aqi_lag_1": 1,
+        "aqi_lag_3": 3,
+        "aqi_lag_6": 6,
+        "aqi_lag_24": 24,
+    }
 
-    if "aqi_lag_1" in row.index:
+    for (
+        column,
+        hours,
+    ) in lag_mapping.items():
 
-        row["aqi_lag_1"] = (
-            get_history_value(
-                aqi_history,
-                1,
+        if column not in row.index:
+            continue
+
+        lookup_time = (
+            forecast_timestamp
+            - pd.Timedelta(
+                hours=hours
             )
         )
 
-    if "aqi_lag_3" in row.index:
-
-        row["aqi_lag_3"] = (
-            get_history_value(
-                aqi_history,
-                3,
+        row[
+            column
+        ] = (
+            get_aqi_at_or_before(
+                history,
+                lookup_time,
             )
         )
 
-    if "aqi_lag_6" in row.index:
+    rolling_mapping = {
+        "aqi_roll_3": 3,
+        "aqi_roll_6": 6,
+        "aqi_roll_24": 24,
+    }
 
-        row["aqi_lag_6"] = (
-            get_history_value(
-                aqi_history,
-                6,
+    for (
+        column,
+        hours,
+    ) in rolling_mapping.items():
+
+        if column not in row.index:
+            continue
+
+        row[
+            column
+        ] = (
+            get_rolling_mean(
+                history,
+                forecast_timestamp,
+                hours,
             )
-        )
-
-    if "aqi_lag_24" in row.index:
-
-        row["aqi_lag_24"] = (
-            get_history_value(
-                aqi_history,
-                24,
-            )
-        )
-
-    # --------------------------------------------------------
-    # Rolling features
-    # --------------------------------------------------------
-
-    if "aqi_roll_3" in row.index:
-
-        values = (
-            aqi_history[-3:]
-        )
-
-        row["aqi_roll_3"] = float(
-            np.mean(values)
-        )
-
-    if "aqi_roll_6" in row.index:
-
-        values = (
-            aqi_history[-6:]
-        )
-
-        row["aqi_roll_6"] = float(
-            np.mean(values)
-        )
-
-    if "aqi_roll_24" in row.index:
-
-        values = (
-            aqi_history[-24:]
-        )
-
-        row["aqi_roll_24"] = float(
-            np.mean(values)
         )
 
     return row
 
 
 # ============================================================
-# PREPARE MODEL INPUT
+# Extend Recursive History
+# ============================================================
+
+def extend_recursive_history(
+    history,
+    previous_timestamp,
+    forecast_timestamp,
+    previous_aqi,
+    predicted_aqi,
+):
+    """
+    Add synthetic hourly AQI points between 3-hour forecasts.
+
+    Example
+    -------
+    Known/predicted AQI at 20:00.
+
+    Forecast is for 23:00.
+
+    21:00 and 22:00 use persistence of the most recent AQI.
+    23:00 receives the newly predicted AQI.
+
+    This keeps lag_1, lag_3, lag_6 and lag_24 aligned with the
+    hourly training semantics.
+    """
+
+    history = history.copy()
+
+    timestamp = (
+        previous_timestamp
+        + pd.Timedelta(
+            hours=1
+        )
+    )
+
+    while (
+        timestamp
+        < forecast_timestamp
+    ):
+
+        history.loc[
+            timestamp
+        ] = float(
+            previous_aqi
+        )
+
+        timestamp = (
+            timestamp
+            + pd.Timedelta(
+                hours=1
+            )
+        )
+
+    history.loc[
+        forecast_timestamp
+    ] = float(
+        predicted_aqi
+    )
+
+    history = (
+        history
+        .sort_index()
+    )
+
+    return history
+
+
+# ============================================================
+# Prepare Model Input
 # ============================================================
 
 def prepare_model_input(
@@ -560,58 +1439,50 @@ def prepare_model_input(
     expected_columns,
 ):
     """
-    Convert one future observation into the exact feature
-    structure expected by the saved pipeline.
+    Create exact raw feature structure expected by pipeline.
     """
 
-    X = pd.DataFrame(
-        [row]
+    dataframe = pd.DataFrame(
+        [
+            row
+        ]
     )
 
-    # --------------------------------------------------------
-    # Remove non-model columns
-    # --------------------------------------------------------
-
-    X = X.drop(
+    dataframe = dataframe.drop(
         columns=[
             column
-            for column in NON_MODEL_COLUMNS
-            if column in X.columns
+            for column
+            in NON_MODEL_COLUMNS
+            if column
+            in dataframe.columns
         ],
         errors="ignore",
     )
 
-    # --------------------------------------------------------
-    # Check required columns
-    # --------------------------------------------------------
-
     missing_columns = [
         column
-        for column in expected_columns
-        if column not in X.columns
+        for column
+        in expected_columns
+        if column
+        not in dataframe.columns
     ]
 
     if missing_columns:
 
         raise RuntimeError(
-            "Future forecast row is missing "
-            "model features:\n"
+            "Forecast row is missing model features:\n"
             f"{missing_columns}"
         )
 
-    # --------------------------------------------------------
-    # Exact training column order
-    # --------------------------------------------------------
-
-    X = X[
+    dataframe = dataframe[
         expected_columns
     ]
 
-    return X
+    return dataframe
 
 
 # ============================================================
-# FORECAST ONE CITY
+# Forecast Single City
 # ============================================================
 
 def forecast_city(
@@ -619,32 +1490,26 @@ def forecast_city(
     city_data,
     city,
     expected_columns,
+    production_info,
+    source_name,
 ):
     """
-    Generate a recursive 72-hour forecast for one city.
-
-    Forecast interval:
-        3 hours
-
-    Total points:
-        24
+    Generate a recursive 72-hour AQI forecast for one city.
     """
 
     city_data = (
         city_data
-        .sort_values("timestamp")
+        .sort_values(
+            "timestamp"
+        )
         .copy()
     )
 
     if city_data.empty:
 
         raise ValueError(
-            f"No historical data found for {city}."
+            f"No data found for {city}."
         )
-
-    # --------------------------------------------------------
-    # Latest observation
-    # --------------------------------------------------------
 
     latest_row = (
         city_data
@@ -652,83 +1517,142 @@ def forecast_city(
         .copy()
     )
 
-    latest_timestamp = (
-        latest_row["timestamp"]
-    )
-
-    # --------------------------------------------------------
-    # Hourly historical AQI
-    # --------------------------------------------------------
-
-    aqi_history = (
-        city_data[
-            "us_aqi"
+    latest_timestamp = pd.Timestamp(
+        latest_row[
+            "timestamp"
         ]
-        .astype(float)
-        .tolist()
     )
 
-    if len(aqi_history) < 24:
+    history = (
+        build_hourly_aqi_history(
+            city_data
+        )
+    )
+
+    coverage_hours = (
+        history.index.max()
+        - history.index.min()
+    ).total_seconds() / 3600
+
+    if (
+        coverage_hours
+        < MINIMUM_HISTORY_HOURS
+    ):
 
         raise ValueError(
-            f"{city} does not contain enough "
-            "historical AQI observations."
+            f"{city} does not contain "
+            f"{MINIMUM_HISTORY_HOURS} hours "
+            "of usable AQI history."
         )
 
     forecast_rows = []
 
-    # --------------------------------------------------------
-    # Recursive forecast
-    # --------------------------------------------------------
+    previous_timestamp = (
+        latest_timestamp
+    )
+
+    previous_aqi = float(
+        history.iloc[-1]
+    )
 
     for step in range(
         1,
         FORECAST_STEPS + 1,
     ):
 
+        hours_ahead = (
+            step
+            * FORECAST_INTERVAL_HOURS
+        )
+
         forecast_timestamp = (
             latest_timestamp
             + pd.Timedelta(
-                hours=(
-                    step
-                    * FORECAST_INTERVAL_HOURS
-                )
+                hours=hours_ahead
             )
         )
+
+        # ----------------------------------------------------
+        # Add persistence values for intermediate hours.
+        # ----------------------------------------------------
+
+        intermediate_timestamp = (
+            previous_timestamp
+            + pd.Timedelta(
+                hours=1
+            )
+        )
+
+        while (
+            intermediate_timestamp
+            < forecast_timestamp
+        ):
+
+            history.loc[
+                intermediate_timestamp
+            ] = previous_aqi
+
+            intermediate_timestamp = (
+                intermediate_timestamp
+                + pd.Timedelta(
+                    hours=1
+                )
+            )
+
+        history = (
+            history
+            .sort_index()
+        )
+
+        # ----------------------------------------------------
+        # Start from latest known meteorological/pollutant
+        # conditions.
+        # ----------------------------------------------------
 
         future_row = (
             latest_row.copy()
         )
 
+        future_row[
+            "timestamp"
+        ] = forecast_timestamp
+
         # ----------------------------------------------------
-        # Update calendar features
+        # Calendar features
         # ----------------------------------------------------
 
-        future_row = update_time_features(
-            future_row,
-            forecast_timestamp,
+        future_row = (
+            update_time_features(
+                future_row,
+                forecast_timestamp,
+            )
         )
 
         # ----------------------------------------------------
-        # Update AQI lag/rolling features
+        # Recursive AQI features
         # ----------------------------------------------------
 
-        future_row = update_aqi_features(
-            future_row,
-            aqi_history,
+        future_row = (
+            update_aqi_features(
+                future_row,
+                history,
+                forecast_timestamp,
+            )
         )
 
         # ----------------------------------------------------
-        # Model input
+        # Exact model input
         # ----------------------------------------------------
 
-        X_future = prepare_model_input(
-            future_row,
-            expected_columns,
+        X_future = (
+            prepare_model_input(
+                future_row,
+                expected_columns,
+            )
         )
 
         # ----------------------------------------------------
-        # Predict AQI +3h
+        # Predict t + 3h
         # ----------------------------------------------------
 
         prediction = model.predict(
@@ -739,22 +1663,31 @@ def forecast_city(
             prediction[0]
         )
 
-        # AQI cannot be negative
         predicted_aqi = max(
             0.0,
             predicted_aqi,
         )
 
-        # ----------------------------------------------------
-        # Save prediction in recursive history
-        # ----------------------------------------------------
-
-        aqi_history.append(
-            predicted_aqi
+        predicted_aqi = min(
+            500.0,
+            predicted_aqi,
         )
 
         # ----------------------------------------------------
-        # Update base row for following forecast
+        # Add recursive prediction to hourly history
+        # ----------------------------------------------------
+
+        history.loc[
+            forecast_timestamp
+        ] = predicted_aqi
+
+        history = (
+            history
+            .sort_index()
+        )
+
+        # ----------------------------------------------------
+        # Update recursive state
         # ----------------------------------------------------
 
         latest_row = (
@@ -768,6 +1701,14 @@ def forecast_city(
         latest_row[
             "timestamp"
         ] = forecast_timestamp
+
+        previous_timestamp = (
+            forecast_timestamp
+        )
+
+        previous_aqi = (
+            predicted_aqi
+        )
 
         # ----------------------------------------------------
         # Result
@@ -785,10 +1726,7 @@ def forecast_city(
                     step,
 
                 "hours_ahead":
-                    (
-                        step
-                        * FORECAST_INTERVAL_HOURS
-                    ),
+                    hours_ahead,
 
                 "predicted_aqi":
                     round(
@@ -806,8 +1744,26 @@ def forecast_city(
                         predicted_aqi
                     ),
 
+                "health_guidance":
+                    get_health_guidance(
+                        predicted_aqi
+                    ),
+
                 "model":
-                    BEST_MODEL_NAME,
+                    production_info[
+                        "model_name"
+                    ],
+
+                "model_version":
+                    production_info[
+                        "version"
+                    ],
+
+                "data_source":
+                    source_name,
+
+                "forecast_method":
+                    "recursive_persistence",
             }
         )
 
@@ -817,19 +1773,21 @@ def forecast_city(
 
 
 # ============================================================
-# FORECAST ALL CITIES
+# Generate All Forecasts
 # ============================================================
 
 def generate_3day_forecast(
     model,
-    df,
+    production_info,
+    realtime_df,
+    historical_df,
 ):
     """
-    Generate the 3-day forecast for every available city.
+    Generate 72-hour forecasts for all supported cities.
     """
 
     print("\n" + "=" * 70)
-    print("GENERATING 3-DAY AQI FORECAST")
+    print("GENERATING PRODUCTION 3-DAY AQI FORECAST")
     print("=" * 70)
 
     expected_columns = (
@@ -839,24 +1797,22 @@ def generate_3day_forecast(
     )
 
     print(
-        f"\nModel expects "
-        f"{len(expected_columns)} features."
-    )
-
-    cities = sorted(
-        df["city"]
-        .dropna()
-        .unique()
-        .tolist()
+        f"\nModel            : "
+        f"{production_info['model_name']}"
     )
 
     print(
-        f"Cities to forecast: "
-        f"{len(cities)}"
+        f"Version          : "
+        f"{production_info['version']}"
     )
 
     print(
-        f"Forecast horizon: "
+        f"Model features   : "
+        f"{len(expected_columns)}"
+    )
+
+    print(
+        f"Forecast horizon : "
         f"{FORECAST_HOURS} hours"
     )
 
@@ -866,42 +1822,97 @@ def generate_3day_forecast(
     )
 
     print(
-        f"Predictions per city: "
+        f"Points per city  : "
         f"{FORECAST_STEPS}"
     )
 
     forecasts = []
 
-    for city in cities:
+    skipped_cities = []
 
-        print("\n" + "-" * 60)
+    for city in SUPPORTED_CITIES:
 
         print(
-            f"Forecasting: {city}"
-        )
-
-        city_data = (
-            df[
-                df["city"] == city
-            ]
-            .copy()
-        )
-
-        city_forecast = forecast_city(
-            model=model,
-            city_data=city_data,
-            city=city,
-            expected_columns=expected_columns,
-        )
-
-        forecasts.append(
-            city_forecast
+            "\n" + "-" * 60
         )
 
         print(
-            f"Created "
-            f"{len(city_forecast)} "
-            "forecast points."
+            f"Forecasting: "
+            f"{city}"
+        )
+
+        try:
+
+            (
+                city_data,
+                source_name,
+            ) = (
+                select_city_forecast_source(
+                    city=city,
+                    realtime_df=(
+                        realtime_df
+                    ),
+                    historical_df=(
+                        historical_df
+                    ),
+                    expected_columns=(
+                        expected_columns
+                    ),
+                )
+            )
+
+            print(
+                f"Data source: "
+                f"{source_name}"
+            )
+
+            print(
+                f"Latest observation: "
+                f"{city_data['timestamp'].max()}"
+            )
+
+            city_forecast = (
+                forecast_city(
+                    model=model,
+                    city_data=city_data,
+                    city=city,
+                    expected_columns=(
+                        expected_columns
+                    ),
+                    production_info=(
+                        production_info
+                    ),
+                    source_name=(
+                        source_name
+                    ),
+                )
+            )
+
+            forecasts.append(
+                city_forecast
+            )
+
+            print(
+                f"Created "
+                f"{len(city_forecast)} "
+                "forecast points."
+            )
+
+        except Exception as error:
+
+            print(
+                f"Forecast failed for "
+                f"{city}: {error}"
+            )
+
+            skipped_cities.append(
+                city
+            )
+
+    if not forecasts:
+
+        raise RuntimeError(
+            "No city forecasts could be generated."
         )
 
     result = pd.concat(
@@ -917,21 +1928,35 @@ def generate_3day_forecast(
                 "city",
             ]
         )
-        .reset_index(drop=True)
+        .reset_index(
+            drop=True
+        )
     )
+
+    if skipped_cities:
+
+        print(
+            "\nCities skipped:"
+        )
+
+        for city in skipped_cities:
+
+            print(
+                f"  - {city}"
+            )
 
     return result
 
 
 # ============================================================
-# SAVE FORECAST
+# Save Forecast
 # ============================================================
 
 def save_forecast(
     forecast_df,
 ):
     """
-    Save future forecast.
+    Save 3-day forecast CSV.
     """
 
     forecast_df.to_csv(
@@ -955,14 +1980,15 @@ def save_forecast(
 
 
 # ============================================================
-# DISPLAY SUMMARY
+# Summary
 # ============================================================
 
 def display_summary(
     forecast_df,
+    production_info,
 ):
     """
-    Display forecast summary.
+    Display production forecast summary.
     """
 
     print("\n" + "=" * 70)
@@ -970,17 +1996,22 @@ def display_summary(
     print("=" * 70)
 
     print(
-        f"\nModel            : "
-        f"{BEST_MODEL_NAME}"
+        f"\nProduction Model : "
+        f"{production_info['model_name']}"
     )
 
     print(
-        f"Forecast days    : "
+        f"Model Version    : "
+        f"{production_info['version']}"
+    )
+
+    print(
+        f"Forecast Days    : "
         f"{FORECAST_DAYS}"
     )
 
     print(
-        f"Forecast hours   : "
+        f"Forecast Hours   : "
         f"{FORECAST_HOURS}"
     )
 
@@ -1000,12 +2031,12 @@ def display_summary(
     )
 
     print(
-        f"Forecast start   : "
+        f"Forecast Start   : "
         f"{forecast_df['timestamp'].min()}"
     )
 
     print(
-        f"Forecast end     : "
+        f"Forecast End     : "
         f"{forecast_df['timestamp'].max()}"
     )
 
@@ -1024,28 +2055,37 @@ def display_summary(
         f"{forecast_df['predicted_aqi'].min():.2f}"
     )
 
-    # --------------------------------------------------------
-    # Hazardous forecasts
-    # --------------------------------------------------------
-
-    hazardous = forecast_df[
+    hazardous = (
         forecast_df[
-            "predicted_aqi"
-        ] > 300
-    ]
+            forecast_df[
+                "predicted_aqi"
+            ]
+            > 300
+        ]
+    )
 
     print(
         f"\nHazardous predictions (>300): "
         f"{len(hazardous)}"
     )
 
-    # --------------------------------------------------------
-    # City summary
-    # --------------------------------------------------------
+    print(
+        "\nData-source usage:"
+    )
+
+    print(
+        forecast_df[
+            "data_source"
+        ]
+        .value_counts()
+        .to_string()
+    )
 
     city_summary = (
         forecast_df
-        .groupby("city")
+        .groupby(
+            "city"
+        )
         .agg(
             average_aqi=(
                 "predicted_aqi",
@@ -1078,83 +2118,171 @@ def display_summary(
         "\nFirst 20 forecast rows:"
     )
 
+    display_columns = [
+        "timestamp",
+        "city",
+        "forecast_step",
+        "hours_ahead",
+        "predicted_aqi",
+        "aqi_category",
+        "alert_level",
+        "model",
+        "model_version",
+        "data_source",
+    ]
+
     print(
-        forecast_df.head(
+        forecast_df[
+            display_columns
+        ]
+        .head(
             20
-        ).to_string(
+        )
+        .to_string(
             index=False
         )
     )
 
 
 # ============================================================
-# MAIN
+# Main
 # ============================================================
 
 def main():
 
     print("\n" + "=" * 70)
-    print("3-DAY AQI FORECASTING PIPELINE")
+    print("PRODUCTION 3-DAY AQI FORECASTING PIPELINE")
     print("=" * 70)
 
     # ========================================================
     # STEP 1
+    # Production Model
     # ========================================================
 
     print("\n" + "-" * 70)
-    print("STEP 1: LOADING HISTORICAL DATA")
+    print("STEP 1: LOADING PRODUCTION MODEL")
     print("-" * 70)
 
-    df = load_dataset()
-
-    df = prepare_dataset(
-        df
-    )
-
-    print(
-        f"\nHistorical rows: "
-        f"{len(df):,}"
-    )
-
-    print(
-        f"Cities: "
-        f"{df['city'].nunique()}"
-    )
-
-    print(
-        f"Latest observation: "
-        f"{df['timestamp'].max()}"
+    (
+        model,
+        production_info,
+    ) = (
+        load_production_model()
     )
 
     # ========================================================
     # STEP 2
+    # Expected Features
     # ========================================================
 
-    print("\n" + "-" * 70)
-    print("STEP 2: LOADING LIGHTGBM MODEL")
-    print("-" * 70)
+    expected_columns = (
+        get_model_feature_columns(
+            model
+        )
+    )
 
-    model = load_best_model()
-
-    # ========================================================
-    # STEP 3
-    # ========================================================
-
-    print("\n" + "-" * 70)
-    print("STEP 3: GENERATING 3-DAY FORECAST")
-    print("-" * 70)
-
-    forecast_df = generate_3day_forecast(
-        model=model,
-        df=df,
+    print(
+        f"\nProduction model expects "
+        f"{len(expected_columns)} "
+        "raw features."
     )
 
     # ========================================================
-    # STEP 4
+    # STEP 3
+    # Real-Time Data
     # ========================================================
 
     print("\n" + "-" * 70)
-    print("STEP 4: SAVING FORECAST")
+    print("STEP 2: LOADING REAL-TIME FEATURES")
+    print("-" * 70)
+
+    try:
+
+        realtime_df = (
+            load_realtime_dataset()
+        )
+
+    except Exception as error:
+
+        print(
+            "\nReal-time feature loading failed:"
+        )
+
+        print(
+            error
+        )
+
+        realtime_df = None
+
+    # ========================================================
+    # STEP 4
+    # Historical Fallback
+    # ========================================================
+
+    print("\n" + "-" * 70)
+    print("STEP 3: LOADING HISTORICAL FALLBACK")
+    print("-" * 70)
+
+    try:
+
+        historical_df = (
+            load_historical_dataset()
+        )
+
+    except Exception as error:
+
+        print(
+            "\nHistorical dataset loading failed:"
+        )
+
+        print(
+            error
+        )
+
+        historical_df = None
+
+    if (
+        realtime_df is None
+        and
+        historical_df is None
+    ):
+
+        raise RuntimeError(
+            "Neither real-time nor historical "
+            "forecast data is available."
+        )
+
+    # ========================================================
+    # STEP 5
+    # Forecast
+    # ========================================================
+
+    print("\n" + "-" * 70)
+    print("STEP 4: GENERATING 3-DAY FORECAST")
+    print("-" * 70)
+
+    forecast_df = (
+        generate_3day_forecast(
+            model=model,
+            production_info=(
+                production_info
+            ),
+            realtime_df=(
+                realtime_df
+            ),
+            historical_df=(
+                historical_df
+            ),
+        )
+    )
+
+    # ========================================================
+    # STEP 6
+    # Save
+    # ========================================================
+
+    print("\n" + "-" * 70)
+    print("STEP 5: SAVING FORECAST")
     print("-" * 70)
 
     save_forecast(
@@ -1162,19 +2290,25 @@ def main():
     )
 
     # ========================================================
-    # STEP 5
+    # STEP 7
+    # Summary
     # ========================================================
 
     print("\n" + "-" * 70)
-    print("STEP 5: FORECAST SUMMARY")
+    print("STEP 6: FORECAST SUMMARY")
     print("-" * 70)
 
     display_summary(
-        forecast_df
+        forecast_df=(
+            forecast_df
+        ),
+        production_info=(
+            production_info
+        ),
     )
 
     # ========================================================
-    # COMPLETE
+    # Complete
     # ========================================================
 
     print("\n" + "=" * 70)
@@ -1188,8 +2322,9 @@ def main():
 
 
 # ============================================================
-# ENTRY POINT
+# Entry Point
 # ============================================================
 
 if __name__ == "__main__":
+
     main()

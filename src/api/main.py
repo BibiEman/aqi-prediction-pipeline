@@ -1,15 +1,19 @@
 """
 main.py
 
-FastAPI application for the AQI Prediction System.
+Production FastAPI application for the
+AQI Prediction System.
 
-Features
---------
-- Health check
-- Available cities
-- Production model information
-- Real-time AQI and weather monitoring
-- 3-day AQI forecasting
+Capabilities
+------------
+- API health checking
+- production model information
+- supported cities
+- current real-time AQI/weather
+- recursive 3-day AQI forecasting
+- production registry integration
+- real-time-first forecasting
+- historical fallback while live history accumulates
 
 Endpoints
 ---------
@@ -19,44 +23,52 @@ GET  /model
 GET  /cities
 GET  /current/{city}
 POST /forecast
+GET  /forecast/{city}
 """
 
-from pathlib import Path
-from typing import Any, Dict
-
-import json
 import logging
+from typing import (
+    Any,
+    Dict,
+    Optional,
+)
 
-import joblib
 import pandas as pd
 
-from fastapi import FastAPI, HTTPException
+from fastapi import (
+    FastAPI,
+    HTTPException,
+)
+
+from fastapi.middleware.cors import (
+    CORSMiddleware,
+)
+
 
 from src.api.schemas import (
+    ForecastPoint,
     ForecastRequest,
     ForecastResponse,
-    ForecastPoint,
+    HealthResponse,
 )
 
-from src.model_training.config import (
-    REGISTRY_FILE,
-)
-
-from src.model_training.utils import (
-    load_dataset,
-)
 
 from src.model_training.predict import (
     FORECAST_DAYS,
     FORECAST_INTERVAL_HOURS,
+    SUPPORTED_CITIES,
+    generate_3day_forecast,
     get_model_feature_columns,
+    load_historical_dataset,
+    load_production_model,
+    load_realtime_dataset,
+    select_city_forecast_source,
     forecast_city,
-    prepare_dataset,
 )
+
 
 from src.realtime.realtime_monitor import (
     get_current_conditions,
-    SUPPORTED_CITIES,
 )
 
 
@@ -66,7 +78,12 @@ from src.realtime.realtime_monitor import (
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(levelname)s: %(message)s",
+    format=(
+        "%(asctime)s | "
+        "%(levelname)s | "
+        "%(name)s | "
+        "%(message)s"
+    ),
 )
 
 logger = logging.getLogger(
@@ -79,213 +96,143 @@ logger = logging.getLogger(
 # ============================================================
 
 app = FastAPI(
-    title="AQI Intelligence API",
-    description=(
-        "Production API for real-time AQI monitoring "
-        "and 3-day air-quality forecasting."
+    title=(
+        "AQI Intelligence API"
     ),
-    version="3.0.0",
+    description=(
+        "Production AQI monitoring and "
+        "3-day forecasting API."
+    ),
+    version="4.0.0",
 )
 
 
 # ============================================================
-# Global Resources
+# CORS
+# ============================================================
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "*",
+    ],
+    allow_credentials=False,
+    allow_methods=[
+        "*",
+    ],
+    allow_headers=[
+        "*",
+    ],
+)
+
+
+# ============================================================
+# Global Production Resources
 # ============================================================
 
 production_model = None
 
-production_info: Dict[str, Any] = {}
-
-historical_dataset = None
+production_info: Dict[
+    str,
+    Any,
+] = {}
 
 expected_model_features = None
 
+historical_dataset: Optional[
+    pd.DataFrame
+] = None
+
+realtime_dataset: Optional[
+    pd.DataFrame
+] = None
+
 
 # ============================================================
-# Load Registry
+# City Normalization
 # ============================================================
 
-def load_registry() -> dict:
+def get_canonical_city(
+    city: str,
+) -> str:
     """
-    Load the local model registry.
+    Validate and normalize a supported city.
     """
 
-    registry_path = Path(
-        REGISTRY_FILE
+    lookup = {
+        supported.lower():
+            supported
+
+        for supported
+        in SUPPORTED_CITIES
+    }
+
+    requested = (
+        city
+        .strip()
+        .lower()
     )
 
-    if not registry_path.exists():
-
-        raise FileNotFoundError(
-            "Model registry was not found:\n"
-            f"{registry_path}"
+    canonical = (
+        lookup.get(
+            requested
         )
-
-    with open(
-        registry_path,
-        "r",
-        encoding="utf-8",
-    ) as file:
-
-        registry = json.load(
-            file
-        )
-
-    return registry
-
-
-# ============================================================
-# Get Production Model Information
-# ============================================================
-
-def get_production_info():
-    """
-    Find the model/version currently marked
-    as production in the registry.
-    """
-
-    registry = load_registry()
-
-    models = registry.get(
-        "models",
-        {},
     )
 
-    if not models:
+    if canonical is None:
 
-        raise RuntimeError(
-            "No models exist in the model registry."
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message":
+                    (
+                        f"City '{city}' "
+                        "is not supported."
+                    ),
+
+                "available_cities":
+                    SUPPORTED_CITIES,
+            },
         )
 
-    for (
-        model_name,
-        model_data,
-    ) in models.items():
-
-        production_version = (
-            model_data.get(
-                "production_version"
-            )
-        )
-
-        if not production_version:
-            continue
-
-        versions = model_data.get(
-            "versions",
-            [],
-        )
-
-        for version_info in versions:
-
-            if (
-                version_info.get(
-                    "version"
-                )
-                == production_version
-            ):
-
-                return {
-                    "model":
-                        model_name,
-
-                    "version":
-                        production_version,
-
-                    "metrics":
-                        version_info.get(
-                            "metrics",
-                            {},
-                        ),
-
-                    "model_path":
-                        version_info.get(
-                            "model_path"
-                        ),
-
-                    "dataset_version":
-                        version_info.get(
-                            "dataset_version"
-                        ),
-
-                    "registered_at":
-                        version_info.get(
-                            "registered_at"
-                        ),
-                }
-
-    raise RuntimeError(
-        "No production model exists in the registry."
-    )
+    return canonical
 
 
 # ============================================================
-# Load Production Model
+# Load Production Resources
 # ============================================================
 
-def load_production_model():
+def initialize_production_resources():
     """
-    Load the registered production model.
+    Load registry production model and datasets.
     """
 
     global production_model
     global production_info
     global expected_model_features
+    global historical_dataset
+    global realtime_dataset
 
     print(
         "\n" + "=" * 70
     )
+
     print(
-        "LOADING PRODUCTION MODEL"
+        "INITIALIZING AQI PRODUCTION API"
     )
+
     print(
         "=" * 70
     )
 
-    info = get_production_info()
+    # --------------------------------------------------------
+    # Production model
+    # --------------------------------------------------------
 
-    model_path = info.get(
-        "model_path"
-    )
-
-    if not model_path:
-
-        raise RuntimeError(
-            "Production model path is missing."
-        )
-
-    model_path = Path(
-        model_path
-    )
-
-    if not model_path.exists():
-
-        raise FileNotFoundError(
-            "Production model file "
-            "does not exist:\n"
-            f"{model_path}"
-        )
-
-    print(
-        f"\nModel   : "
-        f"{info['model']}"
-    )
-
-    print(
-        f"Version : "
-        f"{info['version']}"
-    )
-
-    print(
-        f"Path    : "
-        f"{model_path}"
-    )
-
-    production_model = joblib.load(
-        model_path
-    )
-
-    production_info = info
+    (
+        production_model,
+        production_info,
+    ) = load_production_model()
 
     expected_model_features = (
         get_model_feature_columns(
@@ -293,59 +240,345 @@ def load_production_model():
         )
     )
 
+    # --------------------------------------------------------
+    # Historical fallback
+    # --------------------------------------------------------
+
+    try:
+
+        historical_dataset = (
+            load_historical_dataset()
+        )
+
+    except Exception as error:
+
+        logger.warning(
+            "Historical dataset "
+            "could not be loaded: %s",
+            error,
+        )
+
+        historical_dataset = None
+
+    # --------------------------------------------------------
+    # Real-time features
+    # --------------------------------------------------------
+
+    try:
+
+        realtime_dataset = (
+            load_realtime_dataset()
+        )
+
+    except Exception as error:
+
+        logger.warning(
+            "Real-time dataset "
+            "could not be loaded: %s",
+            error,
+        )
+
+        realtime_dataset = None
+
+    if (
+        historical_dataset is None
+        and
+        realtime_dataset is None
+    ):
+
+        raise RuntimeError(
+            "No forecasting dataset is available."
+        )
+
     print(
-        "\nProduction model loaded successfully."
+        "\nProduction resources loaded."
     )
 
     print(
-        f"Expected features: "
+        f"Model   : "
+        f"{production_info['model_name']}"
+    )
+
+    print(
+        f"Version : "
+        f"{production_info['version']}"
+    )
+
+    print(
+        f"Features: "
         f"{len(expected_model_features)}"
     )
 
+    if realtime_dataset is not None:
+
+        print(
+            f"Real-time rows : "
+            f"{len(realtime_dataset):,}"
+        )
+
+    if historical_dataset is not None:
+
+        print(
+            f"Historical rows: "
+            f"{len(historical_dataset):,}"
+        )
+
 
 # ============================================================
-# Load Historical Dataset
+# Refresh Real-Time Dataset
 # ============================================================
 
-def load_historical_data():
+def refresh_realtime_dataset():
     """
-    Load and prepare historical feature data
-    used by recursive forecasting.
+    Reload real-time feature file before forecasting.
+
+    This prevents the API from using a stale copy loaded
+    only when the server started.
     """
 
-    global historical_dataset
+    global realtime_dataset
 
-    print(
-        "\n" + "=" * 70
+    try:
+
+        latest = (
+            load_realtime_dataset()
+        )
+
+        if latest is not None:
+
+            realtime_dataset = latest
+
+    except Exception as error:
+
+        logger.warning(
+            "Could not refresh real-time "
+            "features: %s",
+            error,
+        )
+
+
+# ============================================================
+# Build Forecast Response
+# ============================================================
+
+def create_forecast_response(
+    city: str,
+) -> ForecastResponse:
+    """
+    Generate one city's production forecast.
+    """
+
+    if production_model is None:
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Production model "
+                "is unavailable."
+            ),
+        )
+
+    canonical_city = (
+        get_canonical_city(
+            city
+        )
     )
-    print(
-        "LOADING HISTORICAL DATA"
+
+    refresh_realtime_dataset()
+
+    try:
+
+        (
+            city_data,
+            source_name,
+        ) = (
+            select_city_forecast_source(
+                city=canonical_city,
+
+                realtime_df=(
+                    realtime_dataset
+                ),
+
+                historical_df=(
+                    historical_dataset
+                ),
+
+                expected_columns=(
+                    expected_model_features
+                ),
+            )
+        )
+
+    except Exception as error:
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No suitable forecasting "
+                f"data is available for "
+                f"{canonical_city}. "
+                f"Error: {error}"
+            ),
+        ) from error
+
+    logger.info(
+        "Generating 3-day forecast "
+        "for %s using %s",
+        canonical_city,
+        source_name,
     )
-    print(
-        "=" * 70
-    )
 
-    df = load_dataset()
+    try:
 
-    df = prepare_dataset(
-        df
-    )
+        forecast_df = (
+            forecast_city(
+                model=production_model,
 
-    historical_dataset = df
+                city_data=city_data,
 
-    print(
-        f"\nRows   : "
-        f"{len(df):,}"
-    )
+                city=canonical_city,
 
-    print(
-        f"Cities : "
-        f"{df['city'].nunique()}"
-    )
+                expected_columns=(
+                    expected_model_features
+                ),
 
-    print(
-        f"Latest : "
-        f"{df['timestamp'].max()}"
+                production_info=(
+                    production_info
+                ),
+
+                source_name=(
+                    source_name
+                ),
+            )
+        )
+
+    except Exception as error:
+
+        logger.exception(
+            "Forecast generation failed "
+            "for %s",
+            canonical_city,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Forecast generation failed "
+                f"for {canonical_city}. "
+                f"Error: {error}"
+            ),
+        ) from error
+
+    if forecast_df.empty:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Forecast pipeline returned "
+                "no predictions."
+            ),
+        )
+
+    points = []
+
+    for _, row in (
+        forecast_df.iterrows()
+    ):
+
+        points.append(
+            ForecastPoint(
+                timestamp=str(
+                    row[
+                        "timestamp"
+                    ]
+                ),
+
+                forecast_step=int(
+                    row[
+                        "forecast_step"
+                    ]
+                ),
+
+                hours_ahead=int(
+                    row[
+                        "hours_ahead"
+                    ]
+                ),
+
+                predicted_aqi=float(
+                    row[
+                        "predicted_aqi"
+                    ]
+                ),
+
+                aqi_category=str(
+                    row[
+                        "aqi_category"
+                    ]
+                ),
+
+                alert_level=str(
+                    row[
+                        "alert_level"
+                    ]
+                ),
+
+                health_guidance=str(
+                    row.get(
+                        "health_guidance",
+                        "",
+                    )
+                ),
+
+                data_source=str(
+                    row.get(
+                        "data_source",
+                        source_name,
+                    )
+                ),
+
+                forecast_method=str(
+                    row.get(
+                        "forecast_method",
+                        (
+                            "recursive_"
+                            "persistence"
+                        ),
+                    )
+                ),
+            )
+        )
+
+    return ForecastResponse(
+        city=canonical_city,
+
+        model=production_info[
+            "model_name"
+        ],
+
+        version=production_info[
+            "version"
+        ],
+
+        forecast_days=(
+            FORECAST_DAYS
+        ),
+
+        forecast_interval_hours=(
+            FORECAST_INTERVAL_HOURS
+        ),
+
+        predictions_count=(
+            len(points)
+        ),
+
+        data_source=(
+            source_name
+        ),
+
+        forecast=points,
+
+        status="success",
     )
 
 
@@ -360,13 +593,16 @@ def root():
     """
 
     return {
-        "message":
+        "service":
             "AQI Intelligence API",
+
+        "version":
+            "4.0.0",
 
         "status":
             "running",
 
-        "services": {
+        "endpoints": {
             "health":
                 "/health",
 
@@ -376,11 +612,14 @@ def root():
             "cities":
                 "/cities",
 
-            "current_conditions":
+            "current":
                 "/current/{city}",
 
-            "forecast":
+            "forecast_post":
                 "/forecast",
+
+            "forecast_get":
+                "/forecast/{city}",
 
             "documentation":
                 "/docs",
@@ -392,72 +631,16 @@ def root():
 # Health Check
 # ============================================================
 
-@app.get("/health")
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+)
 def health():
     """
-    Check whether required API resources are ready.
+    Return API readiness information.
     """
 
-    ready = (
-        production_model is not None
-        and historical_dataset is not None
-        and bool(
-            production_info
-        )
-    )
-
-    if not ready:
-
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "AQI service is not ready."
-            ),
-        )
-
-    return {
-        "status":
-            "healthy",
-
-        "production_model":
-            production_info[
-                "model"
-            ],
-
-        "production_version":
-            production_info[
-                "version"
-            ],
-
-        "historical_rows":
-            len(
-                historical_dataset
-            ),
-
-        "cities":
-            historical_dataset[
-                "city"
-            ].nunique(),
-
-        "realtime_monitoring":
-            True,
-
-        "forecasting":
-            True,
-    }
-
-
-# ============================================================
-# Production Model Information
-# ============================================================
-
-@app.get("/model")
-def model_info():
-    """
-    Return production-model metadata.
-    """
-
-    if not production_info:
+    if production_model is None:
 
         raise HTTPException(
             status_code=503,
@@ -467,10 +650,109 @@ def model_info():
             ),
         )
 
+    realtime_rows = (
+        len(
+            realtime_dataset
+        )
+        if realtime_dataset
+        is not None
+        else 0
+    )
+
+    historical_rows = (
+        len(
+            historical_dataset
+        )
+        if historical_dataset
+        is not None
+        else 0
+    )
+
+    available_cities = set()
+
+    if realtime_dataset is not None:
+
+        available_cities.update(
+            realtime_dataset[
+                "city"
+            ]
+            .dropna()
+            .astype(str)
+            .tolist()
+        )
+
+    if historical_dataset is not None:
+
+        available_cities.update(
+            historical_dataset[
+                "city"
+            ]
+            .dropna()
+            .astype(str)
+            .tolist()
+        )
+
+    return HealthResponse(
+        status="healthy",
+
+        production_model=(
+            production_info[
+                "model_name"
+            ]
+        ),
+
+        production_version=(
+            production_info[
+                "version"
+            ]
+        ),
+
+        realtime_rows=(
+            realtime_rows
+        ),
+
+        historical_rows=(
+            historical_rows
+        ),
+
+        cities=(
+            len(
+                available_cities
+            )
+        ),
+
+        forecasting=True,
+
+        realtime_monitoring=True,
+    )
+
+
+# ============================================================
+# Model Information
+# ============================================================
+
+@app.get(
+    "/model"
+)
+def model_information():
+    """
+    Return production-model metadata.
+    """
+
+    if not production_info:
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Production registry "
+                "is unavailable."
+            ),
+        )
+
     return {
         "model":
             production_info[
-                "model"
+                "model_name"
             ],
 
         "version":
@@ -494,11 +776,23 @@ def model_info():
                 "registered_at"
             ),
 
+        "model_path":
+            production_info.get(
+                "resolved_model_path"
+            ),
+
         "forecast_days":
             FORECAST_DAYS,
 
         "forecast_interval_hours":
             FORECAST_INTERVAL_HOURS,
+
+        "forecast_points_per_city":
+            (
+                FORECAST_DAYS
+                * 24
+                // FORECAST_INTERVAL_HOURS
+            ),
     }
 
 
@@ -506,114 +800,57 @@ def model_info():
 # Available Cities
 # ============================================================
 
-@app.get("/cities")
+@app.get(
+    "/cities"
+)
 def cities():
     """
-    Return cities available for monitoring/forecasting.
+    Return supported cities.
     """
-
-    if historical_dataset is None:
-
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Historical dataset "
-                "is not loaded."
-            ),
-        )
-
-    historical_cities = sorted(
-        historical_dataset[
-            "city"
-        ]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
-
-    # Only expose cities supported by both
-    # the live monitor and historical forecasting.
-    supported_lookup = {
-        city.lower(): city
-        for city in SUPPORTED_CITIES
-    }
-
-    common_cities = []
-
-    for city in historical_cities:
-
-        canonical = supported_lookup.get(
-            city.lower()
-        )
-
-        if canonical:
-            common_cities.append(
-                canonical
-            )
 
     return {
         "count":
-            len(common_cities),
+            len(
+                SUPPORTED_CITIES
+            ),
 
         "cities":
-            common_cities,
+            SUPPORTED_CITIES,
     }
 
 
 # ============================================================
-# Real-Time Current Conditions
+# Current Conditions
 # ============================================================
 
-@app.get("/current/{city}")
+@app.get(
+    "/current/{city}"
+)
 def current_conditions(
     city: str,
 ):
     """
-    Return real-time weather, pollutant,
-    AQI category and health guidance for a city.
+    Return current weather, pollutants and AQI.
     """
 
-    city_lookup = {
-        name.lower(): name
-        for name in SUPPORTED_CITIES
-    }
-
-    requested_city = (
-        city
-        .strip()
-        .lower()
-    )
-
     canonical_city = (
-        city_lookup.get(
-            requested_city
+        get_canonical_city(
+            city
         )
     )
-
-    if canonical_city is None:
-
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "message": (
-                    f"City '{city}' "
-                    "is not supported."
-                ),
-                "available_cities":
-                    SUPPORTED_CITIES,
-            },
-        )
 
     try:
 
         logger.info(
-            "Fetching real-time conditions for %s",
+            "Fetching current conditions "
+            "for %s",
             canonical_city,
         )
 
-        result = get_current_conditions(
-            canonical_city
+        result = (
+            get_current_conditions(
+                canonical_city
+            )
         )
 
         return {
@@ -626,7 +863,8 @@ def current_conditions(
     except Exception as error:
 
         logger.exception(
-            "Real-time monitoring failed for %s",
+            "Current-condition request "
+            "failed for %s",
             canonical_city,
         )
 
@@ -634,214 +872,107 @@ def current_conditions(
             status_code=500,
             detail=(
                 "Could not retrieve current "
-                f"conditions for {canonical_city}. "
+                f"conditions for "
+                f"{canonical_city}. "
                 f"Error: {error}"
             ),
-        )
+        ) from error
 
 
 # ============================================================
-# 3-Day Forecast
+# Forecast - POST
 # ============================================================
 
 @app.post(
     "/forecast",
     response_model=ForecastResponse,
 )
-def forecast(
+def forecast_post(
     request: ForecastRequest,
 ):
     """
-    Generate a 72-hour AQI forecast for one city.
+    Generate one 3-day AQI forecast.
     """
 
-    if production_model is None:
-
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Production model "
-                "is not loaded."
-            ),
+    return (
+        create_forecast_response(
+            request.city
         )
+    )
 
-    if historical_dataset is None:
 
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Historical dataset "
-                "is not loaded."
-            ),
+# ============================================================
+# Forecast - GET
+# ============================================================
+
+@app.get(
+    "/forecast/{city}",
+    response_model=ForecastResponse,
+)
+def forecast_get(
+    city: str,
+):
+    """
+    Convenience GET endpoint for dashboard usage.
+    """
+
+    return (
+        create_forecast_response(
+            city
         )
+    )
+
+
+# ============================================================
+# Refresh Production Resources
+# ============================================================
+
+@app.post(
+    "/refresh"
+)
+def refresh_resources():
+    """
+    Reload the production registry/model and latest datasets.
+
+    Useful after a new model version is promoted.
+    """
 
     try:
 
-        # ----------------------------------------------------
-        # Match city
-        # ----------------------------------------------------
+        initialize_production_resources()
 
-        city_matches = (
-            historical_dataset[
-                historical_dataset[
-                    "city"
-                ]
-                .astype(str)
-                .str.lower()
-                == request.city.lower()
-            ]
-            .copy()
-        )
+        return {
+            "status":
+                "success",
 
-        if city_matches.empty:
+            "message":
+                "Production resources refreshed.",
 
-            available = sorted(
-                historical_dataset[
-                    "city"
-                ]
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            )
+            "model":
+                production_info[
+                    "model_name"
+                ],
 
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "message": (
-                        f"City "
-                        f"'{request.city}' "
-                        "was not found."
-                    ),
-                    "available_cities":
-                        available,
-                },
-            )
-
-        city_name = str(
-            city_matches[
-                "city"
-            ].iloc[0]
-        )
-
-        logger.info(
-            "Generating 3-day forecast for %s",
-            city_name,
-        )
-
-        # ----------------------------------------------------
-        # Generate Forecast
-        # ----------------------------------------------------
-
-        forecast_df = forecast_city(
-            model=production_model,
-            city_data=city_matches,
-            city=city_name,
-            expected_columns=(
-                expected_model_features
-            ),
-        )
-
-        if forecast_df.empty:
-
-            raise RuntimeError(
-                "Forecast returned no rows."
-            )
-
-        # ----------------------------------------------------
-        # Convert to response objects
-        # ----------------------------------------------------
-
-        forecast_points = []
-
-        for _, row in forecast_df.iterrows():
-
-            forecast_points.append(
-                ForecastPoint(
-                    timestamp=str(
-                        row[
-                            "timestamp"
-                        ]
-                    ),
-
-                    forecast_step=int(
-                        row[
-                            "forecast_step"
-                        ]
-                    ),
-
-                    hours_ahead=int(
-                        row[
-                            "hours_ahead"
-                        ]
-                    ),
-
-                    predicted_aqi=float(
-                        row[
-                            "predicted_aqi"
-                        ]
-                    ),
-
-                    aqi_category=str(
-                        row[
-                            "aqi_category"
-                        ]
-                    ),
-
-                    alert_level=str(
-                        row[
-                            "alert_level"
-                        ]
-                    ),
-                )
-            )
-
-        return ForecastResponse(
-            city=city_name,
-
-            model=production_info[
-                "model"
-            ],
-
-            version=production_info[
-                "version"
-            ],
-
-            forecast_days=(
-                FORECAST_DAYS
-            ),
-
-            forecast_interval_hours=(
-                FORECAST_INTERVAL_HOURS
-            ),
-
-            predictions_count=(
-                len(
-                    forecast_points
-                )
-            ),
-
-            forecast=forecast_points,
-
-            status="success",
-        )
-
-    except HTTPException:
-        raise
+            "version":
+                production_info[
+                    "version"
+                ],
+        }
 
     except Exception as error:
 
         logger.exception(
-            "Forecast failed."
+            "Resource refresh failed."
         )
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "Forecast generation failed. "
+                "Could not refresh "
+                "production resources. "
                 f"Error: {error}"
             ),
-        )
+        ) from error
 
 
 # ============================================================
@@ -853,52 +984,47 @@ def forecast(
 )
 def startup_event():
     """
-    Load production resources once when
-    the FastAPI application starts.
+    Load production resources when API starts.
     """
 
     try:
 
-        load_production_model()
-
-        load_historical_data()
+        initialize_production_resources()
 
         print(
             "\n" + "=" * 70
         )
+
         print(
             "AQI API READY"
         )
+
         print(
             "=" * 70
         )
 
         print(
-            "\nProduction Model : "
-            f"{production_info['model']}"
+            f"\nProduction Model : "
+            f"{production_info['model_name']}"
         )
 
         print(
-            "Version          : "
+            f"Version          : "
             f"{production_info['version']}"
         )
 
         print(
-            "Forecast Horizon : "
+            f"Forecast Horizon : "
             f"{FORECAST_DAYS} days"
         )
 
         print(
-            "Forecast Interval: "
+            f"Forecast Interval: "
             f"{FORECAST_INTERVAL_HOURS} hours"
         )
 
         print(
-            "Real-Time Monitor: enabled"
-        )
-
-        print(
-            "Supported Cities : "
+            f"Supported Cities : "
             f"{len(SUPPORTED_CITIES)}"
         )
 

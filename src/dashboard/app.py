@@ -598,14 +598,11 @@ def get_current_conditions(city):
 
 def get_forecast(city):
     """
-    Generate 3-day forecast.
+    Generate 3-day forecast using the production GET endpoint.
     """
 
-    return api_post(
-        FORECAST_URL,
-        {
-            "city": city,
-        },
+    return api_get(
+        f"{FORECAST_URL}/{city}"
     )
 
 
@@ -1061,6 +1058,32 @@ forecast_response = (
 
 
 # ============================================================
+# FORECAST METADATA
+# ============================================================
+
+forecast_source = (
+    forecast_response.get(
+        "data_source",
+        "Unknown",
+    )
+)
+
+forecast_model = (
+    forecast_response.get(
+        "model",
+        "Unknown",
+    )
+)
+
+forecast_version = (
+    forecast_response.get(
+        "version",
+        "Unknown",
+    )
+)
+
+
+# ============================================================
 # DASHBOARD HEADER
 # ============================================================
 
@@ -1090,6 +1113,59 @@ st.header(
 st.success(
     f"Dashboard generated successfully for {active_city}."
 )
+
+
+# ============================================================
+# PRODUCTION FORECAST STATUS
+# ============================================================
+
+status_1, status_2, status_3 = (
+    st.columns(3)
+)
+
+status_1.metric(
+    "🤖 Production Model",
+    forecast_model,
+)
+
+status_2.metric(
+    "🏷️ Model Version",
+    forecast_version,
+)
+
+if forecast_source == "REALTIME":
+
+    status_3.metric(
+        "📡 Forecast Source",
+        "Real-Time",
+    )
+
+    st.success(
+        "📡 This forecast is generated from the latest "
+        "real-time feature history."
+    )
+
+elif forecast_source == "HISTORICAL_FALLBACK":
+
+    status_3.metric(
+        "📚 Forecast Source",
+        "Historical Fallback",
+    )
+
+    st.info(
+        "📚 Real-time history is still accumulating. "
+        "The forecasting system is currently using the "
+        "latest validated historical feature history. "
+        "It will switch automatically to real-time forecasting "
+        "once sufficient live history is available."
+    )
+
+else:
+
+    status_3.metric(
+        "🗂️ Forecast Source",
+        str(forecast_source),
+    )
 
 
 # ============================================================
@@ -2197,26 +2273,36 @@ with tab_table:
     )
 
 
+    display_columns = [
+        "timestamp",
+        "forecast_step",
+        "hours_ahead",
+        "predicted_aqi",
+        "aqi_category",
+        "alert_level",
+    ]
+
+    if "health_guidance" in forecast_df.columns:
+        display_columns.append(
+            "health_guidance"
+        )
+
     display_df = forecast_df[
-        [
-            "timestamp",
-            "forecast_step",
-            "hours_ahead",
-            "predicted_aqi",
-            "aqi_category",
-            "alert_level",
-        ]
+        display_columns
     ].copy()
 
 
-    display_df.columns = [
-        "Forecast Time",
-        "Step",
-        "Hours Ahead",
-        "Predicted AQI",
-        "AQI Category",
-        "Alert Level",
-    ]
+    display_df = display_df.rename(
+        columns={
+            "timestamp": "Forecast Time",
+            "forecast_step": "Step",
+            "hours_ahead": "Hours Ahead",
+            "predicted_aqi": "Predicted AQI",
+            "aqi_category": "AQI Category",
+            "alert_level": "Alert Level",
+            "health_guidance": "Health Guidance",
+        }
+    )
 
 
     display_df[
