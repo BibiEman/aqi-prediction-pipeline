@@ -1,51 +1,54 @@
-"""
-app.py
-
-Professional Streamlit dashboard for the AQI Prediction System.
-
-Features
---------
-- Blank landing page before city selection
-- User-controlled dashboard generation
-- Real-time AQI monitoring
-- Current weather monitoring
-- Pollutant monitoring
-- Health guidance
-- 3-day / 72-hour AQI forecasting
-- 3-hour forecast intervals
-- Interactive Plotly visualizations
-- Daily forecast summaries
-- Forecast statistics
-- Downloadable forecast CSV
-
-Backend
--------
-FastAPI endpoints:
-
-    GET  /health
-    GET  /cities
-    GET  /current/{city}
-    POST /forecast
-"""
-
 from datetime import datetime
+import os
 
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 import streamlit as st
 
+from src.model_training.predict import (
+    SUPPORTED_CITIES,
+    forecast_city,
+    get_model_feature_columns,
+    load_historical_dataset,
+    load_production_model,
+    load_realtime_dataset,
+    select_city_forecast_source,
+)
+from src.realtime.realtime_monitor import (
+    get_current_conditions as fetch_current_conditions,
+)
+
 
 # ============================================================
-# API CONFIGURATION
+# STREAMLIT CLOUD CONFIGURATION
 # ============================================================
 
-API_BASE_URL = "http://127.0.0.1:8000"
+def configure_runtime_secrets():
+    """
+    Expose Streamlit secrets as environment variables expected by
+    the project's existing data-collection modules.
 
-HEALTH_URL = f"{API_BASE_URL}/health"
-CITIES_URL = f"{API_BASE_URL}/cities"
-CURRENT_URL = f"{API_BASE_URL}/current"
-FORECAST_URL = f"{API_BASE_URL}/forecast"
+    Local development continues to work with ordinary environment
+    variables or a local .env file.
+    """
+
+    for key in (
+        "OPENWEATHER_API_KEY",
+        "HOPSWORKS_API_KEY",
+    ):
+        if os.getenv(key):
+            continue
+
+        try:
+            value = st.secrets.get(key)
+        except Exception:
+            value = None
+
+        if value:
+            os.environ[key] = str(value)
+
+
+configure_runtime_secrets()
 
 
 # ============================================================
@@ -54,7 +57,6 @@ FORECAST_URL = f"{API_BASE_URL}/forecast"
 
 st.set_page_config(
     page_title="Air Quality Intelligence",
-    page_icon="🌤️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -522,88 +524,171 @@ def nearest_forecast_value(
 
 
 # ============================================================
-# API HELPERS
+# PRODUCTION DATA HELPERS
 # ============================================================
 
-def api_get(url):
+@st.cache_resource
+def load_dashboard_resources():
     """
-    Execute GET request.
+    Load the production model and forecasting datasets once per
+    Streamlit application process.
+
+    Streamlit Community Cloud redeploys when the connected GitHub
+    branch changes, so newly committed real-time feature history is
+    picked up automatically on redeploy.
     """
 
-    response = requests.get(
-        url,
-        timeout=20,
+    model, production_info = load_production_model()
+
+    expected_features = get_model_feature_columns(
+        model
     )
 
-    response.raise_for_status()
+    realtime_df = None
+    historical_df = None
 
-    return response.json()
+    try:
+        realtime_df = load_realtime_dataset()
+    except Exception as error:
+        print(
+            "Real-time feature loading failed: "
+            f"{error}"
+        )
 
+    try:
+        historical_df = load_historical_dataset()
+    except Exception as error:
+        print(
+            "Historical fallback loading failed: "
+            f"{error}"
+        )
 
-def api_post(
-    url,
-    payload,
-):
-    """
-    Execute POST request.
-    """
+    if realtime_df is None and historical_df is None:
+        raise RuntimeError(
+            "Neither real-time nor historical forecasting "
+            "data is available."
+        )
 
-    response = requests.post(
-        url,
-        json=payload,
-        timeout=30,
+    return (
+        model,
+        production_info,
+        expected_features,
+        realtime_df,
+        historical_df,
     )
 
-    response.raise_for_status()
 
-    return response.json()
-
-
-@st.cache_data(ttl=30)
 def get_health():
-    """
-    Get backend health status.
-    """
+    """Return production-resource readiness for the sidebar."""
 
-    return api_get(
-        HEALTH_URL
-    )
+    (
+        model,
+        production_info,
+        expected_features,
+        realtime_df,
+        historical_df,
+    ) = load_dashboard_resources()
+
+    return {
+        "status": "healthy",
+        "production_model": production_info[
+            "model_name"
+        ],
+        "production_version": production_info[
+            "version"
+        ],
+        "realtime_rows": (
+            len(realtime_df)
+            if realtime_df is not None
+            else 0
+        ),
+        "historical_rows": (
+            len(historical_df)
+            if historical_df is not None
+            else 0
+        ),
+        "cities": len(SUPPORTED_CITIES),
+        "forecasting": True,
+        "realtime_monitoring": True,
+    }
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def get_cities():
-    """
-    Get supported city list.
-    """
+    """Return supported project cities."""
 
-    response = api_get(
-        CITIES_URL
-    )
-
-    return response.get(
-        "cities",
-        [],
-    )
+    return list(SUPPORTED_CITIES)
 
 
 def get_current_conditions(city):
     """
-    Fetch current AQI/weather data.
+    Fetch current AQI, pollutants, and weather directly from the
+    project's real-time monitoring module.
     """
 
-    return api_get(
-        f"{CURRENT_URL}/{city}"
+    return fetch_current_conditions(
+        city
     )
 
 
 def get_forecast(city):
     """
-    Generate 3-day forecast using the production GET endpoint.
+    Generate a production 3-day forecast directly from the
+    production registry model and latest available feature history.
     """
 
-    return api_get(
-        f"{FORECAST_URL}/{city}"
+    (
+        model,
+        production_info,
+        expected_features,
+        realtime_df,
+        historical_df,
+    ) = load_dashboard_resources()
+
+    (
+        city_data,
+        source_name,
+    ) = select_city_forecast_source(
+        city=city,
+        realtime_df=realtime_df,
+        historical_df=historical_df,
+        expected_columns=expected_features,
     )
+
+    forecast_df = forecast_city(
+        model=model,
+        city_data=city_data,
+        city=city,
+        expected_columns=expected_features,
+        production_info=production_info,
+        source_name=source_name,
+    )
+
+    forecast_records = forecast_df.copy()
+
+    if "timestamp" in forecast_records.columns:
+        forecast_records["timestamp"] = (
+            forecast_records["timestamp"]
+            .astype(str)
+        )
+
+    return {
+        "city": city,
+        "model": production_info[
+            "model_name"
+        ],
+        "version": production_info[
+            "version"
+        ],
+        "forecast_days": 3,
+        "forecast_interval_hours": 3,
+        "predictions_count": len(forecast_records),
+        "data_source": source_name,
+        "forecast": forecast_records.to_dict(
+            orient="records"
+        ),
+        "status": "success",
+    }
 
 
 # ============================================================
@@ -649,7 +734,7 @@ if "active_city" not in st.session_state:
 with st.sidebar:
 
     st.title(
-        "🌐 AQI Control Center"
+        "AQI Control Center"
     )
 
     # --------------------------------------------------------
@@ -658,18 +743,31 @@ with st.sidebar:
 
     if backend_online:
 
-        st.success(
-            "● Services Online"
+        st.markdown(
+            """
+            <div class="status-pill online">
+                <span class="dot"></span>
+                Production services online
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
     else:
 
-        st.error(
-            "● Backend Offline"
+        st.markdown(
+            """
+            <div class="status-pill offline">
+                <span class="dot"></span>
+                Production services unavailable
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-        st.code(
-            "uvicorn src.api.main:app --reload"
+        st.caption(
+            "Production resources could not be initialized. "
+            "Check Streamlit secrets, model artifacts, and data files."
         )
 
         st.stop()
@@ -682,7 +780,7 @@ with st.sidebar:
     # ========================================================
 
     st.subheader(
-        "📍 Location"
+        "Location"
     )
 
 
@@ -730,7 +828,7 @@ with st.sidebar:
     # ========================================================
 
     generate_dashboard = st.button(
-        "✨ Generate Air Quality Dashboard",
+        "Generate Air Quality Dashboard",
         use_container_width=True,
     )
 
@@ -761,7 +859,7 @@ with st.sidebar:
     # ========================================================
 
     st.subheader(
-        "⚙ Forecast Settings"
+        "Forecast Settings"
     )
 
 
@@ -809,32 +907,32 @@ with st.sidebar:
     # ========================================================
 
     st.subheader(
-        "✨ Capabilities"
+        "Capabilities"
     )
 
 
     st.caption(
-        "✓ Real-time AQI monitoring"
+        "Real-time AQI monitoring"
     )
 
     st.caption(
-        "✓ Live pollutant monitoring"
+        "Live pollutant monitoring"
     )
 
     st.caption(
-        "✓ Weather conditions"
+        "Weather conditions"
     )
 
     st.caption(
-        "✓ 72-hour AQI forecast"
+        "72-hour AQI forecast"
     )
 
     st.caption(
-        "✓ Health guidance"
+        "Health guidance"
     )
 
     st.caption(
-        "✓ Risk assessment"
+        "Risk assessment"
     )
 
 
@@ -933,7 +1031,7 @@ if (
     # --------------------------------------------------------
 
     st.title(
-        "🌤️ Air Quality Intelligence"
+        "Air Quality Intelligence"
     )
 
 
@@ -951,7 +1049,7 @@ if (
 
 
     st.info(
-        "👈 Select a city from the sidebar and click "
+        "Select a city from the sidebar and click "
         "**Generate Air Quality Dashboard** to begin."
     )
 
@@ -967,7 +1065,7 @@ if (
     with landing_1:
 
         st.subheader(
-            "🌍 Live Monitoring"
+            "Live Monitoring"
         )
 
         st.write(
@@ -980,7 +1078,7 @@ if (
     with landing_2:
 
         st.subheader(
-            "🔮 3-Day AI Forecast"
+            "3-Day Forecast"
         )
 
         st.write(
@@ -992,7 +1090,7 @@ if (
     with landing_3:
 
         st.subheader(
-            "🩺 Health Intelligence"
+            "Health Intelligence"
         )
 
         st.write(
@@ -1012,7 +1110,7 @@ if (
     with feature_1:
 
         st.info(
-            "🧪 Pollutant Intelligence\n\n"
+            "Pollutant Intelligence\n\n"
             "PM2.5 • PM10 • NO₂ • O₃ • SO₂ • CO"
         )
 
@@ -1020,7 +1118,7 @@ if (
     with feature_2:
 
         st.info(
-            "📈 Forecast Analytics\n\n"
+            "Forecast Analytics\n\n"
             "Trend analysis • Daily summaries • "
             "Forecast statistics"
         )
@@ -1029,7 +1127,7 @@ if (
     with feature_3:
 
         st.info(
-            "📥 Export Results\n\n"
+            "Export Results\n\n"
             "Download the complete 3-day forecast "
             "as a CSV file."
         )
@@ -1087,8 +1185,13 @@ forecast_version = (
 # DASHBOARD HEADER
 # ============================================================
 
+st.markdown(
+    '<div class="section-kicker">Production Monitoring & Forecasting</div>',
+    unsafe_allow_html=True,
+)
+
 st.title(
-    "🌤️ Air Quality Intelligence Dashboard"
+    "Air Quality Intelligence Dashboard"
 )
 
 
@@ -1106,7 +1209,7 @@ st.divider()
 # ============================================================
 
 st.header(
-    f"📍 {active_city}"
+    f"{active_city}"
 )
 
 
@@ -1124,36 +1227,36 @@ status_1, status_2, status_3 = (
 )
 
 status_1.metric(
-    "🤖 Production Model",
+    "Production Model",
     forecast_model,
 )
 
 status_2.metric(
-    "🏷️ Model Version",
+    "Model Version",
     forecast_version,
 )
 
 if forecast_source == "REALTIME":
 
     status_3.metric(
-        "📡 Forecast Source",
+        "Forecast Source",
         "Real-Time",
     )
 
     st.success(
-        "📡 This forecast is generated from the latest "
+        "This forecast is generated from the latest "
         "real-time feature history."
     )
 
 elif forecast_source == "HISTORICAL_FALLBACK":
 
     status_3.metric(
-        "📚 Forecast Source",
+        "Forecast Source",
         "Historical Fallback",
     )
 
     st.info(
-        "📚 Real-time history is still accumulating. "
+        "Real-time history is still accumulating. "
         "The forecasting system is currently using the "
         "latest validated historical feature history. "
         "It will switch automatically to real-time forecasting "
@@ -1163,7 +1266,7 @@ elif forecast_source == "HISTORICAL_FALLBACK":
 else:
 
     status_3.metric(
-        "🗂️ Forecast Source",
+        "Forecast Source",
         str(forecast_source),
     )
 
@@ -1173,7 +1276,7 @@ else:
 # ============================================================
 
 st.subheader(
-    "🟢 Live Air Quality Monitoring"
+    "Live Air Quality Monitoring"
 )
 
 
@@ -1269,7 +1372,7 @@ live_1, live_2, live_3, live_4, live_5 = (
 
 
 live_1.metric(
-    "🌫️ Current AQI",
+    "Current AQI",
     (
         f"{current_aqi}"
         if current_aqi is not None
@@ -1279,7 +1382,7 @@ live_1.metric(
 
 
 live_2.metric(
-    "🫧 PM2.5",
+    "PM2.5",
     (
         f"{current_pm25:.2f} µg/m³"
         if current_pm25 is not None
@@ -1289,7 +1392,7 @@ live_2.metric(
 
 
 live_3.metric(
-    "🌁 PM10",
+    "PM10",
     (
         f"{current_pm10:.2f} µg/m³"
         if current_pm10 is not None
@@ -1299,7 +1402,7 @@ live_3.metric(
 
 
 live_4.metric(
-    "🌡️ Temperature",
+    "Temperature",
     (
         f"{current_temperature:.1f} °C"
         if current_temperature is not None
@@ -1309,7 +1412,7 @@ live_4.metric(
 
 
 live_5.metric(
-    "💧 Humidity",
+    "Humidity",
     (
         f"{current_humidity}%"
         if current_humidity is not None
@@ -1348,7 +1451,7 @@ weather_1, weather_2, weather_3, weather_4 = (
 
 
 weather_1.metric(
-    "🧭 Pressure",
+    "Pressure",
     (
         f"{pressure} hPa"
         if pressure is not None
@@ -1358,7 +1461,7 @@ weather_1.metric(
 
 
 weather_2.metric(
-    "💨 Wind Speed",
+    "Wind Speed",
     (
         f"{wind_speed:.2f} m/s"
         if wind_speed is not None
@@ -1368,7 +1471,7 @@ weather_2.metric(
 
 
 weather_3.metric(
-    "☁️ Cloud Cover",
+    "Cloud Cover",
     (
         f"{cloud_cover}%"
         if cloud_cover is not None
@@ -1378,7 +1481,7 @@ weather_3.metric(
 
 
 weather_4.metric(
-    "👁️ Visibility",
+    "Visibility",
     (
         f"{visibility / 1000:.1f} km"
         if visibility is not None
@@ -1400,7 +1503,7 @@ st.caption(
 # ============================================================
 
 st.subheader(
-    "🩺 Current Health Advisory"
+    "Current Health Advisory"
 )
 
 
@@ -1450,7 +1553,7 @@ if current_aqi is not None:
 # ============================================================
 
 st.subheader(
-    "🧪 Live Pollutant Profile"
+    "Live Pollutant Profile"
 )
 
 
@@ -1579,7 +1682,7 @@ st.divider()
 
 
 st.subheader(
-    "🔮 AI-Powered 3-Day AQI Forecast"
+    "3-Day AQI Forecast"
 )
 
 
@@ -1712,7 +1815,7 @@ forecast_1, forecast_2, forecast_3, forecast_4 = (
 
 
 forecast_1.metric(
-    "⏱️ Next 3 Hours",
+    "Next 3 Hours",
     f"{nearest_aqi:.0f}",
     get_aqi_category(
         nearest_aqi
@@ -1721,7 +1824,7 @@ forecast_1.metric(
 
 
 forecast_2.metric(
-    "🌅 Next Day",
+    "Next Day",
     f"{day_1_aqi:.0f}",
     get_aqi_category(
         day_1_aqi
@@ -1730,7 +1833,7 @@ forecast_2.metric(
 
 
 forecast_3.metric(
-    "🌆 Day +2",
+    "Day +2",
     f"{day_2_aqi:.0f}",
     get_aqi_category(
         day_2_aqi
@@ -1739,7 +1842,7 @@ forecast_3.metric(
 
 
 forecast_4.metric(
-    "🌇 Day +3",
+    "Day +3",
     f"{day_3_aqi:.0f}",
     get_aqi_category(
         day_3_aqi
@@ -1759,11 +1862,11 @@ forecast_4.metric(
     tab_table,
 ) = st.tabs(
     [
-        "📈 Forecast Trend",
-        "📅 Daily Summary",
-        "🩺 Health Guidance",
-        "📊 Data Insights",
-        "📋 Full Forecast",
+        "Forecast Trend",
+        "Daily Summary",
+        "Health Guidance",
+        "Data Insights",
+        "Full Forecast",
     ]
 )
 
@@ -1780,6 +1883,54 @@ with tab_forecast:
 
 
     forecast_chart = go.Figure()
+
+    # --------------------------------------------------------
+    # DYNAMIC VIEW RANGE
+    # --------------------------------------------------------
+
+    forecast_min = float(
+        forecast_df["predicted_aqi"].min()
+    )
+
+    forecast_max = float(
+        forecast_df["predicted_aqi"].max()
+    )
+
+    forecast_span = max(
+        forecast_max - forecast_min,
+        1.0,
+    )
+
+    padding = max(
+        15.0,
+        forecast_span * 2.0,
+    )
+
+    y_min = max(
+        0.0,
+        forecast_min - padding,
+    )
+
+    y_max = min(
+        500.0,
+        forecast_max + padding,
+    )
+
+    if (y_max - y_min) < 50.0:
+        midpoint = (
+            forecast_min
+            + forecast_max
+        ) / 2.0
+
+        y_min = max(
+            0.0,
+            midpoint - 25.0,
+        )
+
+        y_max = min(
+            500.0,
+            midpoint + 25.0,
+        )
 
 
     # --------------------------------------------------------
@@ -1862,19 +2013,15 @@ with tab_forecast:
             mode="lines+markers",
             line=dict(
                 color="#2563EB",
-                width=4,
+                width=3,
             ),
             marker=dict(
-                size=9,
+                size=7,
                 color=marker_colors,
                 line=dict(
                     color="white",
                     width=1.5,
                 ),
-            ),
-            fill="tozeroy",
-            fillcolor=(
-                "rgba(37,99,235,0.07)"
             ),
             hovertemplate=(
                 "<b>%{x|%d %b %Y %H:%M}</b>"
@@ -1920,7 +2067,10 @@ with tab_forecast:
         yaxis=dict(
             title="AQI",
             gridcolor="#EEF2F7",
-            rangemode="tozero",
+            range=[
+                y_min,
+                y_max,
+            ],
         ),
     )
 
@@ -2173,25 +2323,25 @@ with tab_insights:
 
 
     insight_1.metric(
-        "📊 Average AQI",
+        "Average AQI",
         f"{average_aqi:.1f}",
     )
 
 
     insight_2.metric(
-        "🔺 Maximum AQI",
+        "Maximum AQI",
         f"{maximum_aqi:.1f}",
     )
 
 
     insight_3.metric(
-        "🔻 Minimum AQI",
+        "Minimum AQI",
         f"{minimum_aqi:.1f}",
     )
 
 
     insight_4.metric(
-        "↔️ AQI Range",
+        "AQI Range",
         f"{maximum_aqi - minimum_aqi:.1f}",
     )
 
@@ -2325,7 +2475,7 @@ with tab_table:
 # ============================================================
 
 st.subheader(
-    "⚠️ 72-Hour Risk Assessment"
+    "72-Hour Risk Assessment"
 )
 
 
@@ -2369,18 +2519,20 @@ else:
 # ============================================================
 
 st.subheader(
-    "📥 Export Forecast"
+    "Export Forecast"
 )
 
 
 export_df = forecast_df.copy()
 
-
-export_df.insert(
-    0,
-    "city",
-    active_city,
-)
+if "city" not in export_df.columns:
+    export_df.insert(
+        0,
+        "city",
+        active_city,
+    )
+else:
+    export_df["city"] = active_city
 
 
 csv_data = export_df.to_csv(
@@ -2410,7 +2562,7 @@ download_left, download_center, download_right = (
 with download_center:
 
     st.download_button(
-        label="⬇ Download 3-Day Forecast CSV",
+        label="Download 3-Day Forecast CSV",
         data=csv_data,
         file_name=(
             f"{safe_city}_"
@@ -2429,7 +2581,7 @@ st.divider()
 
 
 st.caption(
-    "🌤️ Air Quality Intelligence Platform "
+    "Air Quality Intelligence Platform "
     "• Real-Time Monitoring "
     "• Machine Learning Forecasting "
     f"• Dashboard Session: "
