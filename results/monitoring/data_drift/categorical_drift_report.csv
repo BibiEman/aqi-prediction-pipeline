@@ -1,4 +1,4 @@
 Feature,Metric,Value,Status,Reference Unique Values,Current Unique Values,Reference Samples,Current Samples
-season,Total Variation Distance,0.8304378040305769,DRIFT,2,2,34536,8634
+season,Total Variation Distance,0.8304378040305768,DRIFT,2,2,34536,8634
 day_of_week,Total Variation Distance,0.024322446143154944,NO_DRIFT,7,7,34536,8634
 city,Total Variation Distance,0.00034746351633078987,NO_DRIFT,10,10,34536,8634
