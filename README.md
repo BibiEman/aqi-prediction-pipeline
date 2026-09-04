@@ -1,15 +1,21 @@
 AQI Prediction Pipeline
 
-An end-to-end MLOps project for real-time air-quality monitoring and 72-hour Air Quality Index (AQI) forecasting across major cities in Pakistan.
+An end-to-end MLOps project for real-time air-quality monitoring and
+72-hour Air Quality Index (AQI) forecasting across major cities in
+Pakistan.
 
-The system combines historical and real-time environmental data, feature engineering, machine learning, model monitoring, automated workflows, explainability, and a deployed Streamlit dashboard.
+The system combines historical and real-time environmental data, feature
+engineering, machine learning, model monitoring, automated workflows,
+explainability, and a deployed Streamlit dashboard.
 
 Live Application
 
 Live Dashboard:
 https://aqi-prediction-pipeline-b8va3kbak5yemfvgmstjgs.streamlit.app/
 
-The dashboard provides current AQI and pollutant conditions, weather information, health guidance, AQI forecasts, local model explanations, activity recommendations, and multi-city comparison.
+The dashboard provides current AQI and pollutant conditions, weather
+information, health guidance, AQI forecasts, local model explanations,
+activity recommendations, and multi-city comparison.
 
 Project Overview
 
@@ -51,27 +57,12 @@ Forecasting Scope
 
 The system supports 10 Pakistani cities:
 
-Faisalabad
+Faisalabad, Hyderabad, Islamabad, Karachi, Lahore, Multan, Peshawar,
+Quetta, Rawalpindi, and Sialkot.
 
-Hyderabad
-
-Islamabad
-
-Karachi
-
-Lahore
-
-Multan
-
-Peshawar
-
-Quetta
-
-Rawalpindi
-
-Sialkot
-
-For each city, the production pipeline generates a 72-hour AQI forecast at 3-hour intervals, producing 24 predictions per city and 240 predictions in a complete forecasting run.
+For each city, the production pipeline generates a 72-hour AQI
+forecast at 3-hour intervals, producing 24 predictions per city and
+240 predictions in a complete forecasting run.
 
 System Architecture
 
@@ -129,83 +120,37 @@ Historical period: January 2025 to June 2025
 
 Prediction target: target_aqi
 
-The system also maintains an accumulated real-time feature dataset for production forecasting.
+The system also maintains an accumulated real-time feature dataset for
+production forecasting.
 
 Feature Engineering
 
-The production feature pipeline includes AQI and pollutant measurements, PM2.5, PM10, carbon monoxide, nitrogen dioxide, ozone, sulphur dioxide, weather variables, temporal features, AQI lag features, and AQI rolling statistics.
+The production feature pipeline includes AQI and pollutant measurements,
+PM2.5, PM10, carbon monoxide, nitrogen dioxide, ozone, sulphur dioxide,
+weather variables, temporal features, AQI lag features, and AQI rolling
+statistics.
 
-These features provide both recent AQI behavior and current environmental context to the forecasting model.
+These features provide both recent AQI behavior and current
+environmental context to the forecasting model.
 
 Machine Learning
 
-Seven conventional machine-learning models were evaluated using MAE, RMSE, and R-squared.
+Seven conventional machine-learning models were evaluated using MAE,
+RMSE, and R-squared.
 
-Model
+Model                       MAE         RMSE           R²
 
-MAE
+LightGBM         4.1939   6.7691   0.9664
+ExtraTrees               4.0128       6.8341       0.9657
+RandomForest             4.0226       6.9461       0.9646
+GradientBoosting         4.4233       7.0672       0.9633
+CatBoost                 5.1222       7.7025       0.9564
+XGBoost                  4.3077       7.7887       0.9555
+Ridge                    7.9320      11.5007       0.9029
 
-RMSE
-
-R²
-
-LightGBM
-
-4.1939
-
-6.7691
-
-0.9664
-
-ExtraTrees
-
-4.0128
-
-6.8341
-
-0.9657
-
-RandomForest
-
-4.0226
-
-6.9461
-
-0.9646
-
-GradientBoosting
-
-4.4233
-
-7.0672
-
-0.9633
-
-CatBoost
-
-5.1222
-
-7.7025
-
-0.9564
-
-XGBoost
-
-4.3077
-
-7.7887
-
-0.9555
-
-Ridge
-
-7.9320
-
-11.5007
-
-0.9029
-
-LightGBM v1 was selected as the production model based primarily on RMSE and is integrated with the model registry, forecasting pipeline, monitoring system, API, and dashboard.
+LightGBM v1 was selected as the production model based primarily on
+RMSE and is integrated with the model registry, forecasting pipeline,
+monitoring system, API, and dashboard.
 
 Additional Forecasting Experiments
 
@@ -215,7 +160,9 @@ ARIMA(1,1,1) statistical forecasting baseline
 
 LSTM deep-learning sequence forecasting
 
-These experiments use different evaluation protocols from the production LightGBM model, so their headline metrics should not be interpreted as direct production comparisons.
+These experiments use different evaluation protocols from the production
+LightGBM model, so their headline metrics should not be interpreted as
+direct production comparisons.
 
 72-Hour Forecasting
 
@@ -237,7 +184,8 @@ Assigns AQI categories, alerts, and health guidance.
 
 Produces 24 predictions covering 72 hours.
 
-Forecasts identify their source as either REALTIME or HISTORICAL_FALLBACK.
+Forecasts identify their source as either REALTIME or
+HISTORICAL_FALLBACK.
 
 Model Explainability
 
@@ -255,13 +203,17 @@ Feature contribution analysis
 
 Dashboard-integrated explanation of the next 3-hour AQI prediction
 
-SHAP contributions indicate how individual features move a prediction relative to the model baseline and should not be interpreted as causal effects.
+SHAP contributions indicate how individual features move a prediction
+relative to the model baseline and should not be interpreted as causal
+effects.
 
 Model Monitoring
 
-The monitoring pipeline evaluates feature-distribution drift, RMSE, MAE, R-squared, and retraining conditions.
+The monitoring pipeline evaluates feature-distribution drift, RMSE, MAE,
+R-squared, and retraining conditions.
 
-The retraining decision considers both data drift and model-performance degradation rather than retraining solely because drift is detected.
+The retraining decision considers both data drift and model-performance
+degradation rather than retraining solely because drift is detected.
 
 FastAPI Service
 
@@ -280,9 +232,7 @@ API validation:
 
 python -m pytest tests/test_api.py -v
 
-Validated result:
-
-12 passed
+Validated result: 12 passed
 
 Streamlit Dashboard
 
@@ -318,7 +268,9 @@ CSV forecast export
 
 Production model and forecast-source information
 
-The application includes dedicated pages for Dashboard, Forecast, City Comparison, Smart Planner, Model Explainability, Data & Insights, and About.
+The application includes dedicated pages for Dashboard, Forecast, City
+Comparison, Smart Planner, Model Explainability, Data & Insights, and
+About.
 
 Automation
 
@@ -329,7 +281,8 @@ GitHub Actions automates the main MLOps workflows:
 ├── daily_monitoring.yml
 └── retraining_pipeline.yml
 
-The workflows support recurring real-time data processing, daily monitoring, and conditional model retraining.
+The workflows support recurring real-time data processing, daily
+monitoring, and conditional model retraining.
 
 Project Structure
 
@@ -364,30 +317,33 @@ aqi-prediction-pipeline/
 
 Local Installation
 
-1. Clone the repository
+1. Clone the Repository
 
 git clone https://github.com/BibiEman/aqi-prediction-pipeline.git
 cd aqi-prediction-pipeline
 
-2. Create the environment
+2. Create the Environment
 
 Python 3.11 is recommended.
 
 conda create -n aqi-hopsworks python=3.11
 conda activate aqi-hopsworks
 
-3. Install dependencies
+3. Install Dependencies
 
 python -m pip install -r requirements.txt
 
-SHAP is included in the production dependencies because it is used by the deployed dashboard. ARIMA and LSTM experiments may require additional experimental dependencies such as Statsmodels and TensorFlow.
+SHAP is included in the production dependencies because it is used by
+the deployed dashboard. ARIMA and LSTM experiments may require
+additional dependencies such as Statsmodels and TensorFlow.
 
-4. Configure environment variables
+4. Configure Environment Variables
 
 OPENWEATHER_API_KEY
 HOPSWORKS_API_KEY
 
-API keys should be stored locally or through deployment secrets and should never be committed to the repository.
+API keys should be stored locally or through deployment secrets and
+should never be committed to the repository.
 
 Running the Project
 
@@ -413,7 +369,8 @@ python -m pytest tests/test_api.py -v
 
 Deployment
 
-The production dashboard is deployed on Streamlit Community Cloud from the repository's main branch.
+The production dashboard is deployed on Streamlit Community Cloud
+from the repository's main branch.
 
 Main application: src/dashboard/app.py
 Python: 3.11
@@ -425,65 +382,22 @@ https://aqi-prediction-pipeline-b8va3kbak5yemfvgmstjgs.streamlit.app/
 
 Technology Stack
 
-Area
+Area                      Technology
 
-Technology
-
-Programming
-
-Python 3.11
-
-Data Processing
-
-Pandas, NumPy
-
-Machine Learning
-
-LightGBM, scikit-learn
-
-Deep Learning
-
-TensorFlow / Keras
-
-Statistical Forecasting
-
-Statsmodels / ARIMA
-
-Explainability
-
-SHAP
-
-Feature Store
-
-Hopsworks
-
-API
-
-FastAPI
-
-Dashboard
-
-Streamlit
-
-Visualization
-
-Plotly, Matplotlib
-
-Testing
-
-Pytest
-
-Automation
-
-GitHub Actions
-
-Deployment
-
-Streamlit Community Cloud
-
-Version Control
-
-Git, GitHub
+Programming               Python 3.11
+Data Processing           Pandas, NumPy
+Machine Learning          LightGBM, scikit-learn
+Deep Learning             TensorFlow / Keras
+Statistical Forecasting   Statsmodels / ARIMA
+Explainability            SHAP
+Feature Store             Hopsworks
+API                       FastAPI
+Dashboard                 Streamlit
+Visualization             Plotly, Matplotlib
+Testing                   Pytest
+Automation                GitHub Actions
+Deployment                Streamlit Community Cloud
+Version Control           Git, GitHub
 
 Key Achievements
 
@@ -519,19 +433,25 @@ Deployed Streamlit dashboard
 
 Limitations
 
-Future pollutant and weather variables are not independently forecast at every future step.
+Future pollutant and weather variables are not independently
+forecast at every future step.
 
-Recursive forecasting may accumulate uncertainty over longer horizons.
+Recursive forecasting may accumulate uncertainty over longer
+horizons.
 
 Real-time data availability depends on external services.
 
-Forecast quality may change as environmental conditions drift from the historical training distribution.
+Forecast quality may change as environmental conditions drift from
+the historical training distribution.
 
-Islamabad and Rawalpindi contain identical historical AQI series in the validated historical dataset.
+Islamabad and Rawalpindi contain identical historical AQI series in
+the validated historical dataset.
 
-Smart Activity Planner recommendations are general AQI-based guidance rather than personalized medical advice.
+Smart Activity Planner recommendations are general AQI-based
+guidance rather than personalized medical advice.
 
-Continued collection of new labelled observations is required for robust future retraining.
+Continued collection of new labelled observations is required for
+robust future retraining.
 
 Future Improvements
 
@@ -551,6 +471,11 @@ Expand integration and end-to-end testing
 
 Conclusion
 
-This project demonstrates a complete AQI forecasting and MLOps workflow, from data collection and feature engineering through model training, monitoring, explainability, automation, and cloud deployment.
+This project demonstrates a complete AQI forecasting and MLOps workflow,
+from data collection and feature engineering through model training,
+monitoring, explainability, automation, and cloud deployment.
 
-The final system provides real-time AQI monitoring, 72-hour forecasting, health guidance, SHAP explanations, activity recommendations, and multi-city comparison through a publicly accessible Streamlit application.
+The final system provides real-time AQI monitoring, 72-hour forecasting,
+health guidance, SHAP explanations, activity recommendations, and
+multi-city comparison through a publicly accessible Streamlit
+application.
