@@ -1,12 +1,38 @@
 from datetime import datetime
 from textwrap import dedent
+from pathlib import Path
 import os
+import sys
+
+# ============================================================
+# STREAMLIT CLOUD / PROJECT IMPORT SETUP
+# ============================================================
+# app.py lives at <project_root>/src/dashboard/app.py.  When Streamlit
+# Community Cloud launches this file directly, the repository root is not
+# always present on sys.path.  Add it explicitly before importing from src.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import shap
 import streamlit as st
+
+# Streamlit requires page configuration before other Streamlit commands.
+st.set_page_config(
+    page_title="AQI Predictor",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# SHAP is optional at runtime because the production LightGBM path uses
+# LightGBM's native pred_contrib=True contributions.  Keeping this import
+# optional prevents the whole dashboard from failing if SHAP is unavailable.
+try:
+    import shap
+except ImportError:
+    shap = None
 
 from src.model_training.predict import (
     SUPPORTED_CITIES,
@@ -56,17 +82,6 @@ def configure_runtime_secrets():
 
 
 configure_runtime_secrets()
-
-
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
-
-st.set_page_config(
-    page_title="Air Quality Intelligence",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
 
 # ============================================================
@@ -1287,6 +1302,12 @@ def calculate_shap_explanation(
     else:
         # Fallback for an estimator without a directly available
         # LightGBM booster.
+        if shap is None:
+            raise RuntimeError(
+                "SHAP is not installed and this estimator does not expose "
+                "LightGBM native prediction contributions."
+            )
+
         explainer = shap.TreeExplainer(
             estimator
         )
@@ -1870,13 +1891,6 @@ def get_city_comparison():
 # ============================================================
 # REFERENCE-STYLE DARK DASHBOARD
 # ============================================================
-
-st.set_page_config(
-    page_title="AQI Predictor",
-    page_icon=None,
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
 st.markdown(
     """
