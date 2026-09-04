@@ -2214,7 +2214,6 @@ st.markdown(
 
     .icon-heading {display:flex;align-items:center;gap:.55rem;margin-bottom:.6rem;}
     .weather-main {display:flex;align-items:center;gap:.8rem;margin-bottom:.35rem;}
-    .forecast-icon {height:38px;display:flex;align-items:center;justify-content:center;margin:.1rem 0 .05rem;}
     .planner-row {display:grid;grid-template-columns:54px 1fr;gap:.75rem;align-items:center;}
     .generate-panel {background:linear-gradient(180deg,rgba(13,32,52,.98),rgba(10,26,44,.98));border:1px solid rgba(127,164,199,.15);border-radius:14px;padding:1.25rem;text-align:center;color:#b8c6d6;margin-top:.8rem;}
 
@@ -2429,12 +2428,6 @@ def _svg_icon(kind, size=34, color="#f7c843"):
     alert = f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 3 2.7 20h18.6L12 3Z" fill="{color}"/><rect x="11.1" y="8" width="1.8" height="6.5" rx=".9" fill="#111827"/><circle cx="12" cy="17.2" r="1" fill="#111827"/></svg>'
     return {"sun": sun, "cloud": cloud, "heart": heart, "runner": runner, "alert": alert}.get(kind, cloud)
 
-
-def _forecast_icon(label):
-    if "Day 1" in label or "Day 3" in label:
-        return _svg_icon("sun", 32, "#f7c843")
-    return _svg_icon("cloud", 32, "#b9d6ff")
-
 # ============================================================
 # UI HELPERS
 # ============================================================
@@ -2474,7 +2467,6 @@ def _forecast_box(label, value):
     return f"""
     <div class="forecast-box">
         <div class="forecast-label">{label}</div>
-        <div class="forecast-icon">{_forecast_icon(label)}</div>
         <div class="forecast-num">{float(value):.0f}</div>
         <span class="small-chip" style="background:{color}22;color:{color};border:1px solid {color}55;">{category}</span>
     </div>
@@ -2839,7 +2831,7 @@ if page == "Dashboard":
             )
         )
         fig.update_layout(
-            title={"text": "24-Hour AQI Trend", "font": {"size": 16, "color": "#f8fbff"}},
+            title={"text": "Next 24-Hour AQI Forecast", "font": {"size": 16, "color": "#f8fbff"}},
             height=330,
             margin=dict(l=20, r=20, t=48, b=22),
             paper_bgcolor="rgba(0,0,0,0)",
@@ -2862,7 +2854,7 @@ if page == "Dashboard":
         )
         _render_html(f"""
         <div class="card card-pad">
-            <div class="card-title">3-Day Forecast <span class="muted">(Next 72 Hours)</span></div>
+            <div class="card-title">3-Day AQI Forecast <span class="muted">(Next 72 Hours)</span></div>
             <div class="forecast-row">{cards}</div>
         </div>
         """)
