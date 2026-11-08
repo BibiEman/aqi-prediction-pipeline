@@ -1,5 +1,5 @@
 {
-    "monitoring_timestamp": "2026-11-07T06:53:10.060184+00:00",
+    "monitoring_timestamp": "2026-11-08T06:58:51.090922+00:00",
     "overall_status": "DRIFT_DETECTED",
     "production_model": {
         "model_name": "LightGBM",
